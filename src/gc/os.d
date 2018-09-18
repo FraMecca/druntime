@@ -86,6 +86,8 @@ else version (Posix)
     }
 
     public import core.sys.posix.unistd: pid_t, fork;
+    import core.sys.posix.sys.wait: waitpid, WNOHANG;
+    import core.stdc.errno: errno, EINTR;
 
     //version = GC_Use_Alloc_MMap;
 }
@@ -112,8 +114,8 @@ else static assert(false, "No supported allocation methods available.");
  *
  * The value shown here is just demostrative, the real value is defined based
  * on the OS it's being compiled in.
- */
-const HAVE_FORK = true;
+ * enum HAVE_FORK = true;
+*/
 
 static if (is(typeof(VirtualAlloc))) // version (GC_Use_Alloc_Win32)
 {
@@ -144,7 +146,6 @@ else static if (is(typeof(mmap)))  // else version (GC_Use_Alloc_MMap)
 {
     enum { HAVE_FORK = true }
 
-
     void *os_mem_map(size_t nbytes) nothrow
     {   void *p;
 
@@ -157,17 +158,6 @@ else static if (is(typeof(mmap)))  // else version (GC_Use_Alloc_MMap)
     {
         return munmap(base, nbytes);
     }
-
-    /**
-     * Possible results for the wait_pid() function.
-     */
-    enum WRes
-    {
-     DONE, /// The process has finished successfully
-     RUNNING, /// The process is still running
-     ERROR /// There was an error waiting for the process
-    }
-
 }
 else static if (is(typeof(valloc))) // else version (GC_Use_Alloc_Valloc)
 {
