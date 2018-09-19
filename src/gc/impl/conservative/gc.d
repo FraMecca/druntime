@@ -46,6 +46,7 @@ import gc.gcinterface;
 import rt.util.container.treap;
 
 import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
+import core.stdc.stdio : fflush;
 import core.stdc.string : memcpy, memset, memmove;
 import core.bitop;
 import core.thread;
@@ -58,6 +59,11 @@ else                   import core.stdc.stdio : sprintf, printf; // needed to ou
 
 import core.time;
 alias currTime = MonoTime.currTime;
+
+extern (C) nothrow @nogc
+{
+    void _Exit(int);
+}
 
 debug(PRINTF_TO_FILE)
 {
@@ -1288,6 +1294,7 @@ struct Gcx
     auto rangesLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
     Treap!Root roots;
     Treap!Range ranges;
+    private pid_t markProcPid = 0;
 
     bool log; // turn on logging
     debug(INVARIANT) bool initialized;
@@ -1409,6 +1416,11 @@ struct Gcx
                 }
             }
         }
+    }
+
+    @property bool collectInProgress() const nothrow
+    {
+        return markProcPid != 0;
     }
 
 
@@ -1702,9 +1714,11 @@ struct Gcx
                 if (!newPool(1, false))
                 {
                     // out of memory => try to free some memory
-                    fullcollect();
+                    fullcollect(false, true);
                     if (lowMem) minimize();
                 }
+                else
+                    fullcollect(); // concurrent collection
             }
             else
             {
@@ -2382,7 +2396,7 @@ struct Gcx
     /**
      * Return number of full pages free'd.
      */
-    size_t fullcollect(bool nostack = false) nothrow
+    size_t fullcollect(bool nostack = false, bool block = false) nothrow
     {
         MonoTime start, stop, begin;
 
@@ -2393,7 +2407,36 @@ struct Gcx
 
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
-
+        if (collectInProgress)
+        {
+            WRes rc = wait_pid(markProcPid, block);
+            switch (rc)
+            {
+                case WRes.DONE:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc DONE (block=%d)\n",
+                                                  cast(int) block);
+                    markProcPid = 0;
+                    // process GC marks then sweep
+                    thread_suspendAll();
+                    thread_processGCMarks(&isMarked);
+                    thread_resumeAll();
+                    break;
+                case WRes.RUNNING:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc RUNNING\n");
+                    if (!block)
+                        return 0;
+                    // Something went wrong, if block is true, wait() should never
+                    // returned RUNNING.
+                    goto case WRes.ERROR;
+                case WRes.ERROR:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc ERROR\n");
+                    markProcPid = 0;
+                    return fullcollect(nostack, true); // Try to keep going without forking
+                default:
+                    assert(false, "Unknown wait_pid() result");
+            }
+        }
+        else
         {
             // lock roots and ranges around suspending threads b/c they're not reentrant safe
             rangesLock.lock();
@@ -2414,11 +2457,38 @@ struct Gcx
                 start = stop;
             }
 
-            markAll(nostack);
+            if (block)
+            {
+                markAll(nostack);
+            }
+            else
+            {
+                // fork now and sweep later
+                fflush(null); // avoid duplicated FILE* output
+                auto pid = fork();
+                assert(pid != -1); // TODO handle case
+                switch (pid)
+                {
+                    case -1: // fork() failed, retry without forking
+                        markProcPid = 0;
+                        return fullcollect(nostack, true);
+                    case 0: // child process
+                            markAll(nostack);
+                            _Exit(0);
+                            break; // bogus
+                    default: // the parent
+                        thread_resumeAll();
+                        markProcPid = pid;
+                        return 0;
+                }
+            }
 
             thread_processGCMarks(&isMarked);
             thread_resumeAll();
         }
+
+        // If we reach here, the child process has finished the marking phase
+        // or block == true and we are using standard stop the world collection
 
         if (config.profile)
         {
