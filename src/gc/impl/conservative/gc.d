@@ -1295,6 +1295,7 @@ struct Gcx
     Treap!Root roots;
     Treap!Range ranges;
     private pid_t markProcPid = 0;
+    private bool shouldFork = true;
 
     bool log; // turn on logging
     debug(INVARIANT) bool initialized;
@@ -2391,6 +2392,12 @@ struct Gcx
         usedSmallPages -= freedSmallPages;
         debug(COLLECT_PRINTF) printf("\trecovered pages = %d\n", freedSmallPages);
         return freedSmallPages;
+    }
+
+    void disableFork()
+    {
+        shouldFork = false;
+        markProcPid = 0;
     }
 
     /**
