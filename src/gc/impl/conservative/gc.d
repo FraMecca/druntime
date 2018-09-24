@@ -2414,6 +2414,12 @@ struct Gcx
 
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
+
+        // If there is a mark process running, check if it already finished.
+        // If that is the case, we move to the sweep phase.
+        // If it's still running, either we block until the mark phase is
+        // done (and then sweep to finish the collection), or in case of error
+        // we redo the mark phase without forking.
         if (collectInProgress)
         {
             WRes rc = wait_pid(markProcPid, block);
@@ -2467,10 +2473,23 @@ MARK:
                 start = stop;
             }
 
-            if (block)
+            // Forking is not enabled.
+            // This is a standard stop the world collection
+            // and the mark is done in this thread.
+            if (!shouldFork)
             {
                 markAll(nostack);
             }
+            // Forking is enabled, so we fork() and start a new concurrent mark phase
+            // in the child. If the collection should not block, the parent process
+            // tells the caller no memory could be recycled immediately (if this collection
+            // was triggered by an allocation, the caller should allocate more memory
+            // to fulfill the request).
+            // If the collection should block, the parent will wait for the mark phase
+            // to finish before returning control to the mutator,
+            // but other threads are restarted and may run in parallel with the mark phase
+            // (unless they allocate or use the GC themselves, in which case
+            // the global GC lock will stop them).
             else
             {
                 // fork now and sweep later
@@ -2512,8 +2531,8 @@ MARK:
         }
 
         // If we reach here, the child process has finished the marking phase
-        // or block == true and we are using standard stop the world collection
-
+        // or block == true and we are using standard stop the world collection.
+        // It is time to sweep
         if (config.profile)
         {
             stop = currTime;
