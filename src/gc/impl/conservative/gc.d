@@ -2437,14 +2437,17 @@ struct Gcx
                     goto case WRes.ERROR;
                 case WRes.ERROR:
                     debug(COLLECT_PRINTF) printf("\t\tmark proc ERROR\n");
-                    markProcPid = 0;
-                    return fullcollect(nostack, true); // Try to keep going without forking
+                    // Try to keep going without forking
+                    // and do the marking in this thread
+                    disableFork();
+                    goto MARK;
                 default:
                     assert(false, "Unknown wait_pid() result");
             }
         }
         else
         {
+MARK:
             // lock roots and ranges around suspending threads b/c they're not reentrant safe
             rangesLock.lock();
             rootsLock.lock();
@@ -2477,16 +2480,30 @@ struct Gcx
                 switch (pid)
                 {
                     case -1: // fork() failed, retry without forking
-                        markProcPid = 0;
-                        return fullcollect(nostack, true);
+                        disableFork();
+                        goto MARK;
                     case 0: // child process
                             markAll(nostack);
                             _Exit(0);
                             break; // bogus
                     default: // the parent
                         thread_resumeAll();
-                        markProcPid = pid;
-                        return 0;
+                        if (!block)
+                        {
+                          markProcPid = pid;
+                          return 0;
+                        }
+                        WRes r = wait_pid(pid); // block until marking is done
+                        assert(r == WRes.DONE);
+                        assert(r != WRes.RUNNING);
+                        if (r == WRes.ERROR)
+                        {
+                            thread_suspendAll();
+                            // there was an error
+                            // do the marking in this thread
+                            disableFork();
+                            markAll(nostack);
+                        }
                 }
             }
 
