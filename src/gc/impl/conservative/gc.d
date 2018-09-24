@@ -2394,7 +2394,7 @@ struct Gcx
         return freedSmallPages;
     }
 
-    void disableFork()
+    void disableFork() nothrow
     {
         shouldFork = false;
         markProcPid = 0;
