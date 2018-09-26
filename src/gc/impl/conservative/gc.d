@@ -2446,14 +2446,14 @@ struct Gcx
                     // Try to keep going without forking
                     // and do the marking in this thread
                     disableFork();
-                    goto MARK;
+                    goto Lmark;
                 default:
                     assert(false, "Unknown wait_pid() result");
             }
         }
         else
         {
-MARK:
+Lmark:
             // lock roots and ranges around suspending threads b/c they're not reentrant safe
             rangesLock.lock();
             rootsLock.lock();
@@ -2500,7 +2500,7 @@ MARK:
                 {
                     case -1: // fork() failed, retry without forking
                         disableFork();
-                        goto MARK;
+                        goto Lmark;
                     case 0: // child process
                             markAll(nostack);
                             _Exit(0);
