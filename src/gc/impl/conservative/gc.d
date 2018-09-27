@@ -46,6 +46,7 @@ import gc.gcinterface;
 import rt.util.container.treap;
 
 import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
+import core.stdc.stdio : fflush;
 import core.stdc.string : memcpy, memset, memmove;
 import core.bitop;
 import core.thread;
@@ -58,6 +59,11 @@ else                   import core.stdc.stdio : sprintf, printf; // needed to ou
 
 import core.time;
 alias currTime = MonoTime.currTime;
+
+extern (C) nothrow @nogc
+{
+    void _Exit(int);
+}
 
 debug(PRINTF_TO_FILE)
 {
@@ -1288,6 +1294,8 @@ struct Gcx
     auto rangesLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
     Treap!Root roots;
     Treap!Range ranges;
+    private pid_t markProcPid = 0;
+    private bool shouldFork = true;
 
     bool log; // turn on logging
     debug(INVARIANT) bool initialized;
@@ -1409,6 +1417,11 @@ struct Gcx
                 }
             }
         }
+    }
+
+    @property bool collectInProgress() const nothrow
+    {
+        return markProcPid != 0;
     }
 
 
@@ -1702,9 +1715,11 @@ struct Gcx
                 if (!newPool(1, false))
                 {
                     // out of memory => try to free some memory
-                    fullcollect();
+                    fullcollect(false, true);
                     if (lowMem) minimize();
                 }
+                else
+                    fullcollect(); // concurrent collection
             }
             else
             {
@@ -2379,10 +2394,16 @@ struct Gcx
         return freedSmallPages;
     }
 
+    void disableFork() nothrow
+    {
+        shouldFork = false;
+        markProcPid = 0;
+    }
+
     /**
      * Return number of full pages free'd.
      */
-    size_t fullcollect(bool nostack = false) nothrow
+    size_t fullcollect(bool nostack = false, bool block = false) nothrow
     {
         MonoTime start, stop, begin;
 
@@ -2394,7 +2415,45 @@ struct Gcx
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
 
+        // If there is a mark process running, check if it already finished.
+        // If that is the case, we move to the sweep phase.
+        // If it's still running, either we block until the mark phase is
+        // done (and then sweep to finish the collection), or in case of error
+        // we redo the mark phase without forking.
+        if (collectInProgress)
         {
+            WRes rc = wait_pid(markProcPid, block);
+            switch (rc)
+            {
+                case WRes.DONE:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc DONE (block=%d)\n",
+                                                  cast(int) block);
+                    markProcPid = 0;
+                    // process GC marks then sweep
+                    thread_suspendAll();
+                    thread_processGCMarks(&isMarked);
+                    thread_resumeAll();
+                    break;
+                case WRes.RUNNING:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc RUNNING\n");
+                    if (!block)
+                        return 0;
+                    // Something went wrong, if block is true, wait() should never
+                    // returned RUNNING.
+                    goto case WRes.ERROR;
+                case WRes.ERROR:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc ERROR\n");
+                    // Try to keep going without forking
+                    // and do the marking in this thread
+                    disableFork();
+                    goto Lmark;
+                default:
+                    assert(false, "Unknown wait_pid() result");
+            }
+        }
+        else
+        {
+Lmark:
             // lock roots and ranges around suspending threads b/c they're not reentrant safe
             rangesLock.lock();
             rootsLock.lock();
@@ -2414,12 +2473,66 @@ struct Gcx
                 start = stop;
             }
 
-            markAll(nostack);
+            // Forking is not enabled.
+            // This is a standard stop the world collection
+            // and the mark is done in this thread.
+            if (!shouldFork)
+            {
+                markAll(nostack);
+            }
+            // Forking is enabled, so we fork() and start a new concurrent mark phase
+            // in the child. If the collection should not block, the parent process
+            // tells the caller no memory could be recycled immediately (if this collection
+            // was triggered by an allocation, the caller should allocate more memory
+            // to fulfill the request).
+            // If the collection should block, the parent will wait for the mark phase
+            // to finish before returning control to the mutator,
+            // but other threads are restarted and may run in parallel with the mark phase
+            // (unless they allocate or use the GC themselves, in which case
+            // the global GC lock will stop them).
+            else
+            {
+                // fork now and sweep later
+                fflush(null); // avoid duplicated FILE* output
+                auto pid = fork();
+                assert(pid != -1); // TODO handle case
+                switch (pid)
+                {
+                    case -1: // fork() failed, retry without forking
+                        disableFork();
+                        goto Lmark;
+                    case 0: // child process
+                            markAll(nostack);
+                            _Exit(0);
+                            break; // bogus
+                    default: // the parent
+                        thread_resumeAll();
+                        if (!block)
+                        {
+                          markProcPid = pid;
+                          return 0;
+                        }
+                        WRes r = wait_pid(pid); // block until marking is done
+                        assert(r == WRes.DONE);
+                        assert(r != WRes.RUNNING);
+                        if (r == WRes.ERROR)
+                        {
+                            thread_suspendAll();
+                            // there was an error
+                            // do the marking in this thread
+                            disableFork();
+                            markAll(nostack);
+                        }
+                }
+            }
 
             thread_processGCMarks(&isMarked);
             thread_resumeAll();
         }
 
+        // If we reach here, the child process has finished the marking phase
+        // or block == true and we are using standard stop the world collection.
+        // It is time to sweep
         if (config.profile)
         {
             stop = currTime;
