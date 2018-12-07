@@ -146,15 +146,16 @@ else static if (is(typeof(mmap)))  // else version (GC_Use_Alloc_MMap)
 {
     enum { HAVE_FORK = true }
 
-    void *os_mem_map(size_t nbytes) nothrow
+    void *os_mem_map(size_t nbytes, bool share = false) nothrow
     {   void *p;
 
-        p = mmap(null, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+        auto map_f = share ? MAP_SHARED : MAP_PRIVATE;
+        p = mmap(null, nbytes, PROT_READ | PROT_WRITE, map_f | MAP_ANON, -1, 0);
         return (p == MAP_FAILED) ? null : p;
     }
 
 
-    int os_mem_unmap(void *base, size_t nbytes) nothrow
+    int os_mem_unmap(void *base, size_t nbytes) nothrow @nogc
     {
         return munmap(base, nbytes);
     }

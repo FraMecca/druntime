@@ -13,6 +13,7 @@
  */
 module gc.bits;
 
+import gc.os : os_mem_map, os_mem_unmap;
 
 import core.bitop;
 import core.stdc.string;
@@ -27,28 +28,36 @@ struct GCBits
     enum BITS_SHIFT = (wordtype.sizeof == 8 ? 6 : 5);
     enum BITS_MASK = (BITS_PER_WORD - 1);
     enum BITS_1 = cast(wordtype)1;
+    bool mmap;
 
     wordtype* data;
     size_t nbits;
 
-    void Dtor() nothrow
+    void Dtor() nothrow @nogc
     {
         if (data)
         {
-            free(data);
+            if (mmap)
+                os_mem_unmap(data, nwords * data[0].sizeof);
+            else
+                free(data);
             data = null;
         }
     }
 
-    void alloc(size_t nbits) nothrow
+    void alloc(size_t nbits, bool mmap = false) nothrow
     {
         this.nbits = nbits;
-        data = cast(typeof(data[0])*)calloc(nwords, data[0].sizeof);
+        if (mmap)
+          data = cast(typeof(data[0])*)os_mem_map(nwords * data[0].sizeof, true); // Allocate as MAP_SHARED
+        else
+            data = cast(typeof(data[0])*)calloc(nwords, data[0].sizeof);
         if (!data)
             onOutOfMemoryError();
+        this.mmap = mmap;
     }
 
-    wordtype test(size_t i) const nothrow
+    wordtype test(size_t i) const nothrow @nogc
     in
     {
         assert(i < nbits);

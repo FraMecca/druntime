@@ -2797,7 +2797,8 @@ struct Pool
         topAddr = baseAddr + poolsize;
         auto nbits = cast(size_t)poolsize >> shiftBy;
 
-        mark.alloc(nbits);
+        mark.alloc(nbits, true);
+        mark.setAll();
 
         // pagetable already keeps track of what's free for the large object
         // pool.
