@@ -1324,6 +1324,7 @@ struct Gcx
         mappedPages = 0;
         //printf("gcx = %p, self = %x\n", &this, self);
         debug(INVARIANT) initialized = true;
+        shouldFork = config.fork;
     }
 
 
