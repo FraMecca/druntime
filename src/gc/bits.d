@@ -67,7 +67,7 @@ struct GCBits
         return core.bitop.bt(data, i);
     }
 
-    int set(size_t i) nothrow
+    int set(size_t i) nothrow @nogc
     in
     {
         assert(i < nbits);
@@ -77,7 +77,7 @@ struct GCBits
         return core.bitop.bts(data, i);
     }
 
-    int clear(size_t i) nothrow
+    int clear(size_t i) nothrow @nogc
     in
     {
         assert(i <= nbits);
@@ -87,12 +87,17 @@ struct GCBits
         return core.bitop.btr(data, i);
     }
 
-    void zero() nothrow
+    void zero() nothrow @nogc
     {
         memset(data, 0, nwords * wordtype.sizeof);
     }
 
-    void copy(GCBits *f) nothrow
+    void setAll() nothrow @nogc
+    {
+        memset(data, 0xFF, nwords * wordtype.sizeof);
+    }
+
+    void copy(GCBits *f) nothrow @nogc
     in
     {
         assert(nwords == f.nwords);
@@ -102,7 +107,7 @@ struct GCBits
         memcpy(data, f.data, nwords * wordtype.sizeof);
     }
 
-    @property size_t nwords() const pure nothrow
+    @property size_t nwords() const pure nothrow @nogc
     {
         return (nbits + (BITS_PER_WORD - 1)) >> BITS_SHIFT;
     }
