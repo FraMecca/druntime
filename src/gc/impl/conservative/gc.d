@@ -275,17 +275,44 @@ class ConservativeGC : GC
         gcLock.lock();
     }
 
+    public size_t[2] fill_memory_info() nothrow{
+        // used by tangort.stats.d
+        // TODO remove
+        size_t freeSize, usedSize;
+        foreach (pool; gcx.pooltable[0 .. gcx.npools]){
+            foreach (bin; pool.pagetable[0 .. pool.npages]){
+                if (bin == B_FREE)
+                    freeSize += PAGESIZE;
+                else
+                    usedSize += PAGESIZE;
+              }
+        }
+
+        size_t freeListSize;
+        foreach (n; 0 .. B_PAGE){
+            immutable sz = binsize[n];
+            for (List *list = gcx.bucket[n]; list; list = list.next)
+                freeListSize += sz;
+        }
+        usedSize -= freeListSize;
+        freeSize += freeListSize;
+        size_t[2] ret;
+        ret[0] = usedSize;
+        ret[1] = freeSize;
+        return ret;
+    }
 
     static void initialize(ref GC gc)
     {
         import core.stdc.string: memcpy;
 
-        if(config.gc != "conservative")
+        if (config.gc != "conservative")
               return;
 
+        printf("init forked bench\n");
         auto p = cstdlib.malloc(__traits(classInstanceSize,ConservativeGC));
 
-        if(!p)
+        if (!p)
             onOutOfMemoryErrorNoGC();
 
         auto init = typeid(ConservativeGC).initializer();
