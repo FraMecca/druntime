@@ -1303,6 +1303,8 @@ private void set(ref PageBits bits, size_t i) @nogc pure nothrow
 
 struct Gcx
 {
+    import gc.stats;
+    Stats mystats;
     import core.internal.spinlock;
     auto rootsLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
     auto rangesLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
@@ -1339,6 +1341,8 @@ struct Gcx
         //printf("gcx = %p, self = %x\n", &this, self);
         debug(INVARIANT) initialized = true;
         shouldFork = config.fork;
+
+        mystats = Stats(0);
     }
 
 
@@ -2429,6 +2433,9 @@ struct Gcx
      */
     size_t fullcollect(bool nostack = false, bool block = false) nothrow
     {
+        mystats.collection_started();
+        scope (exit)
+            mystats.collection_finished();
         MonoTime start, stop, begin;
 
         if (config.profile)
@@ -2486,6 +2493,7 @@ Lmark:
                 rangesLock.unlock();
                 rootsLock.unlock();
             }
+            mystats.world_stopped();
             thread_suspendAll();
 
             prepare();
@@ -2531,6 +2539,7 @@ Lmark:
                             break; // bogus
                     default: // the parent
                         thread_resumeAll();
+                        mystats.world_started();
                         if (!block)
                         {
                           markProcPid = pid;
@@ -2542,6 +2551,7 @@ Lmark:
                         if (r == WRes.ERROR)
                         {
                             thread_suspendAll();
+                            mystats.world_stopped();
                             // there was an error
                             // do the marking in this thread
                             disableFork();
@@ -2551,6 +2561,7 @@ Lmark:
             }
 
             thread_processGCMarks(&isMarked);
+            mystats.world_started();
             thread_resumeAll();
         }
 
