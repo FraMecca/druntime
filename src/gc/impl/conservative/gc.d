@@ -888,6 +888,7 @@ class ConservativeGC : GC
 
             list.next = gcx.bucket[bin];
             list.pool = pool;
+            pool.freebits.set(biti);
             gcx.bucket[bin] = list;
         }
 
@@ -1737,6 +1738,10 @@ struct Gcx
         // Return next item from free list
         bucket[bin] = (cast(List*)p).next;
         auto pool = (cast(List*)p).pool;
+        immutable biti = (p - pool.baseAddr) / 16;
+        assert(pool.freebits.test(biti));
+        pool.mark.set(biti); // be sure that the child is aware of the page being used
+        pool.freebits.clear(biti);
         if (bits)
             pool.setBits((p - pool.baseAddr) >> pool.shiftBy, bits);
         //debug(PRINTF) printf("\tmalloc => %p\n", p);
@@ -1810,6 +1815,7 @@ struct Gcx
         pool.pagetable[pn] = B_PAGE;
         if (npages > 1)
             memset(&pool.pagetable[pn + 1], B_PAGEPLUS, npages - 1);
+        pool.mark.set(pn);
         pool.updateOffsets(pn);
         usedLargePages += npages;
         pool.freepages -= npages;
@@ -1866,6 +1872,8 @@ struct Gcx
         if (pool)
         {
             pool.initialize(npages, isLargeObject);
+            if (collectInProgress)
+                pool.mark.setAll();
             if (!pool.baseAddr || !pooltable.insert(pool))
             {
                 pool.Dtor();
@@ -2150,7 +2158,7 @@ struct Gcx
         {
             pool = pooltable[n];
             pool.mark.zero();
-            if(!pool.isLargeObject) pool.freebits.zero();
+            // if (!pool.isLargeObject) pool.freebits.zero();
         }
 
         debug(COLLECT_PRINTF) printf("Set bits\n");
@@ -2297,6 +2305,7 @@ struct Gcx
                                 void* q = sentinel_add(p);
                                 sentinel_Invariant(q);
 
+                                pool.freebits.set(biti);
                                 if (pool.finals.nbits && pool.finals.test(biti))
                                     rt_finalizeFromGC(q, size - SENTINEL_EXTRA, pool.getBits(biti));
 
@@ -2365,7 +2374,8 @@ struct Gcx
                             goto Lnotfree;
                     }
                     pool.pagetable[pn] = B_FREE;
-                    if(pn < pool.searchStart) pool.searchStart = pn;
+                    pool.freebits.set(bitbase);
+                    if (pn < pool.searchStart) pool.searchStart = pn;
                     pool.freepages++;
                     freedSmallPages++;
                     continue;
@@ -2798,14 +2808,14 @@ struct Pool
         auto nbits = cast(size_t)poolsize >> shiftBy;
 
         mark.alloc(nbits, true);
-        mark.setAll();
 
         // pagetable already keeps track of what's free for the large object
         // pool.
-        if(!isLargeObject)
+        if (!isLargeObject)
         {
             freebits.alloc(nbits);
         }
+        freebits.setAll();
 
         noscan.alloc(nbits);
         appendable.alloc(nbits);
@@ -3336,6 +3346,8 @@ struct SmallObjectPool
         size_t size = binsize[bin];
         void* p = baseAddr + pn * PAGESIZE;
         void* ptop = p + PAGESIZE - size;
+        size_t biti = pn * (PAGESIZE / 16);
+        base.freebits.set(biti);
         auto first = cast(List*) p;
 
         for (; p < ptop; p += size)
