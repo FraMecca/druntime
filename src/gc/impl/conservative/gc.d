@@ -2587,6 +2587,8 @@ Lmark:
                 }
             }
 
+            if(shouldFork)
+                thread_suspendAll();
             thread_processGCMarks(&isMarked);
             mystats.world_started();
             thread_resumeAll();
