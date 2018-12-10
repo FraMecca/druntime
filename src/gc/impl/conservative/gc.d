@@ -1339,6 +1339,7 @@ struct Gcx
     Treap!Range ranges;
     private pid_t markProcPid = 0;
     private bool shouldFork = true;
+    private bool shouldMinimize = false;
 
     bool log; // turn on logging
     debug(INVARIANT) bool initialized;
@@ -1761,16 +1762,16 @@ struct Gcx
                 if (!newPool(1, false))
                 {
                     // out of memory => try to free some memory
-                    fullcollect(false, true);
-                    if (lowMem) minimize();
+                    if (lowMem)
+                        shouldMinimize = true;
+                    fullcollect(false, true); // stop the worlds
                 }
-                else
-                    fullcollect(); // concurrent collection
             }
             else
             {
+                if (lowMem)
+                    shouldMinimize = true;
                 fullcollect();
-                if (lowMem) minimize();
             }
             // tryAlloc will succeed if a new pool was allocated above, if it fails allocate a new pool now
             if (!tryAlloc() && (!newPool(1, false) || !tryAlloc()))
@@ -1839,14 +1840,14 @@ struct Gcx
                 if (!tryAllocNewPool())
                 {
                     // disabled but out of memory => try to free some memory
-                    fullcollect();
-                    minimize();
+                    shouldMinimize = true;
+                    fullcollect(false, true);
                 }
             }
             else
             {
+                shouldMinimize = true;
                 fullcollect();
-                minimize();
             }
             // If alloc didn't yet succeed retry now that we collected/minimized
             if (!pool && !tryAlloc() && !tryAllocNewPool())
@@ -2632,6 +2633,13 @@ Lmark:
         }
 
         updateCollectThresholds();
+        // minimize() should be called only after a call to fullcollect
+        // terminates with a sweep
+        if (shouldMinimize)
+        {
+            shouldMinimize = false;
+            minimize();
+        }
 
         return freedLargePages + freedSmallPages;
     }
