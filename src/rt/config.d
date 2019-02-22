@@ -4,8 +4,9 @@ Configuration options for druntime.
 The default way to configure the runtime is by passing command line arguments
 starting with `--DRT-` and followed by the option name, e.g. `--DRT-gcopt` to
 configure the GC.
-Command line options starting with `--DRT-` are filtered out before calling main,
-so the program will not see them. They are still available via `rt_args()`.
+When command line parsing is enabled, command line options starting
+with `--DRT-` are filtered out before calling main, so the program
+will not see them. They are still available via `rt_args()`.
 
 Configuration via the command line can be disabled by declaring a variable for the
 linker to pick up before using it's default from the runtime:
@@ -96,7 +97,7 @@ string rt_configOption(string opt, scope rt_configCallBack dg = null, bool rever
 
 string rt_cmdlineOption(string opt, scope rt_configCallBack dg) @nogc nothrow
 {
-    if(rt_cmdline_enabled!())
+    if (rt_cmdline_enabled!())
     {
         foreach (a; rt_args)
         {
@@ -114,12 +115,12 @@ string rt_cmdlineOption(string opt, scope rt_configCallBack dg) @nogc nothrow
 
 string rt_envvarsOption(string opt, scope rt_configCallBack dg) @nogc nothrow
 {
-    if(rt_envvars_enabled!())
+    if (rt_envvars_enabled!())
     {
         if (opt.length >= 32)
             assert(0);
 
-        char[40] var;
+        char[40] var = void;
         var[0 .. 4] = "DRT_";
         foreach (i, c; opt)
             var[4 + i] = cast(char) toupper(c);
@@ -140,7 +141,7 @@ string rt_linkOption(string opt, scope rt_configCallBack dg) @nogc nothrow
 {
     foreach (a; rt_options!())
     {
-        if(a.length > opt.length && a[0..opt.length] == opt && a[opt.length] == '=')
+        if (a.length > opt.length && a[0..opt.length] == opt && a[opt.length] == '=')
         {
             string s = dg(a[opt.length + 1 .. $]);
             if (s != null)

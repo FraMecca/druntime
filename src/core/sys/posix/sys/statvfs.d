@@ -17,8 +17,8 @@ extern (C) :
 nothrow:
 @nogc:
 
-version(CRuntime_Glibc) {
-    static if(__WORDSIZE == 32)
+version (CRuntime_Glibc) {
+    static if (__WORDSIZE == 32)
     {
         version=_STATVFSBUF_F_UNUSED;
     }
@@ -33,7 +33,7 @@ version(CRuntime_Glibc) {
         fsfilcnt_t f_ffree;
         fsfilcnt_t f_favail;
         c_ulong f_fsid;
-        version(_STATVFSBUF_F_UNUSED)
+        version (_STATVFSBUF_F_UNUSED)
         {
             int __f_unused;
         }
@@ -43,7 +43,7 @@ version(CRuntime_Glibc) {
     }
     /* Definitions for the flag in `f_flag'.  These definitions should be
       kept in sync with the definitions in <sys/mount.h>.  */
-    static if(__USE_GNU)
+    static if (__USE_GNU)
     {
         enum FFlag
         {
@@ -71,7 +71,7 @@ version(CRuntime_Glibc) {
         }
     }
 
-    static if( __USE_FILE_OFFSET64 )
+    static if ( __USE_FILE_OFFSET64 )
     {
         int statvfs64 (const char * file, statvfs_t* buf);
         alias statvfs64 statvfs;
@@ -86,7 +86,7 @@ version(CRuntime_Glibc) {
     }
 
 }
-else version(NetBSD)
+else version (NetBSD)
 {
     enum  _VFS_MNAMELEN = 1024;
     enum  _VFS_NAMELEN = 32;
@@ -119,9 +119,9 @@ else version(NetBSD)
         c_ulong f_namemax;
         int f_owner;
         int[4] f_spare;
-        char[_VFS_NAMELEN] f_fstypename;
-        char[_VFS_MNAMELEN] f_mntonname;
-        char[_VFS_MNAMELEN] f_mntfromname;
+        char[_VFS_NAMELEN] f_fstypename = 0;
+        char[_VFS_MNAMELEN] f_mntonname = 0;
+        char[_VFS_MNAMELEN] f_mntfromname = 0;
     }
 
     enum FFlag

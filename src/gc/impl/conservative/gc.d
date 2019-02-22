@@ -3731,6 +3731,50 @@ debug (LOGGING)
         }
     }
 
+// we can assume the name is always from a literal, so it is zero terminated
+debug(PRINTF)
+string debugTypeName(const(TypeInfo) ti) nothrow
+{
+    string name;
+    if (ti is null)
+        name = "null";
+    else if (auto ci = cast(TypeInfo_Class)ti)
+        name = ci.name;
+    else if (auto si = cast(TypeInfo_Struct)ti)
+        name = si.name;
+    else if (auto ci = cast(TypeInfo_Const)ti)
+        static if (__traits(compiles,ci.base)) // different whether compiled with object.di or object.d
+            return debugTypeName(ci.base);
+        else
+            return debugTypeName(ci.next);
+    else
+        name = ti.classinfo.name;
+    return name;
+}
+
+/* ======================= Leak Detector =========================== */
+
+debug (LOGGING)
+{
+    struct Log
+    {
+        void*  p;
+        size_t size;
+        size_t line;
+        char*  file;
+        void*  parent;
+
+        void print() nothrow
+        {
+            printf("    p = %p, size = %lld, parent = %p ", p, cast(ulong)size, parent);
+            if (file)
+            {
+                printf("%s(%u)", file, line);
+            }
+            printf("\n");
+        }
+    }
+
     struct LogArray
     {
         size_t dim;
@@ -3769,6 +3813,203 @@ debug (LOGGING)
                 }
             }
         }
+
+        void push(Log log) nothrow @nogc
+        {
+            reserve(1);
+            data[dim++] = log;
+        }
+
+        void remove(size_t i) nothrow @nogc
+        {
+            memmove(data + i, data + i + 1, (dim - i) * Log.sizeof);
+            dim--;
+        }
+
+
+        size_t find(void *p) nothrow @nogc
+        {
+            for (size_t i = 0; i < dim; i++)
+            {
+                if (data[i].p == p)
+                    return i;
+            }
+            return OPFAIL; // not found
+        }
+
+
+        void copy(LogArray *from) nothrow @nogc
+        {
+            if (allocdim < from.dim)
+                reserve(from.dim - dim);
+            assert(from.dim <= allocdim);
+            memcpy(data, from.data, from.dim * Log.sizeof);
+            dim = from.dim;
+        }
+    }
+
+    struct LeakDetector
+    {
+        Gcx* gcx;
+        LogArray current;
+        LogArray prev;
+
+        private void initialize(Gcx* gc)
+        {
+            gcx = gc;
+            //debug(PRINTF) printf("+log_init()\n");
+            current.reserve(1000);
+            prev.reserve(1000);
+            //debug(PRINTF) printf("-log_init()\n");
+        }
+
+
+        private void log_malloc(void *p, size_t size) nothrow
+        {
+            //debug(PRINTF) printf("+log_malloc(p = %p, size = %zd)\n", p, size);
+            Log log;
+
+            log.p = p;
+            log.size = size;
+            log.line = ConservativeGC.line;
+            log.file = ConservativeGC.file;
+            log.parent = null;
+
+            ConservativeGC.line = 0;
+            ConservativeGC.file = null;
+
+            current.push(log);
+            //debug(PRINTF) printf("-log_malloc()\n");
+        }
+
+
+        private void log_free(void *p) nothrow @nogc
+        {
+            //debug(PRINTF) printf("+log_free(%p)\n", p);
+            auto i = current.find(p);
+            if (i == OPFAIL)
+            {
+                debug(PRINTF) printf("free'ing unallocated memory %p\n", p);
+            }
+            else
+                current.remove(i);
+            //debug(PRINTF) printf("-log_free()\n");
+        }
+
+
+        private void log_collect() nothrow
+        {
+            //debug(PRINTF) printf("+log_collect()\n");
+            // Print everything in current that is not in prev
+
+            debug(PRINTF) printf("New pointers this cycle: --------------------------------\n");
+            size_t used = 0;
+            for (size_t i = 0; i < current.dim; i++)
+            {
+                auto j = prev.find(current.data[i].p);
+                if (j == OPFAIL)
+                    current.data[i].print();
+                else
+                    used++;
+            }
+
+            debug(PRINTF) printf("All roots this cycle: --------------------------------\n");
+            for (size_t i = 0; i < current.dim; i++)
+            {
+                void* p = current.data[i].p;
+                if (!gcx.findPool(current.data[i].parent))
+                {
+                    auto j = prev.find(current.data[i].p);
+                    debug(PRINTF) printf(j == OPFAIL ? "N" : " ");
+                    current.data[i].print();
+                }
+            }
+
+            debug(PRINTF) printf("Used = %d-------------------------------------------------\n", used);
+            prev.copy(&current);
+
+            debug(PRINTF) printf("-log_collect()\n");
+        }
+
+
+        private void log_parent(void *p, void *parent) nothrow
+        {
+            //debug(PRINTF) printf("+log_parent()\n");
+            auto i = current.find(p);
+            if (i == OPFAIL)
+            {
+                debug(PRINTF) printf("parent'ing unallocated memory %p, parent = %p\n", p, parent);
+                Pool *pool;
+                pool = gcx.findPool(p);
+                assert(pool);
+                size_t offset = cast(size_t)(p - pool.baseAddr);
+                size_t biti;
+                size_t pn = offset / PAGESIZE;
+                Bins bin = cast(Bins)pool.pagetable[pn];
+                biti = (offset & (PAGESIZE - 1)) >> pool.shiftBy;
+                debug(PRINTF) printf("\tbin = %d, offset = x%x, biti = x%x\n", bin, offset, biti);
+            }
+            else
+            {
+                current.data[i].parent = parent;
+            }
+            //debug(PRINTF) printf("-log_parent()\n");
+        }
+    }
+}
+else
+{
+    struct LeakDetector
+    {
+        static void initialize(Gcx* gcx) nothrow { }
+        static void log_malloc(void *p, size_t size) nothrow { }
+        static void log_free(void *p) nothrow @nogc { }
+        static void log_collect() nothrow { }
+        static void log_parent(void *p, void *parent) nothrow { }
+    }
+}
+
+/* ============================ SENTINEL =============================== */
+
+    struct LogArray
+    {
+        size_t dim;
+        size_t allocdim;
+        Log *data;
+
+        void Dtor() nothrow @nogc
+        {
+            if (data)
+                cstdlib.free(data);
+            data = null;
+        }
+
+        void reserve(size_t nentries) nothrow @nogc
+        {
+            assert(dim <= allocdim);
+            if (allocdim - dim < nentries)
+            {
+                allocdim = (dim + nentries) * 2;
+                assert(dim + nentries <= allocdim);
+                if (!data)
+                {
+                    data = cast(Log*)cstdlib.malloc(allocdim * Log.sizeof);
+                    if (!data && allocdim)
+                        onOutOfMemoryErrorNoGC();
+                }
+                else
+                {   Log *newdata;
+
+                    newdata = cast(Log*)cstdlib.malloc(allocdim * Log.sizeof);
+                    if (!newdata && allocdim)
+                        onOutOfMemoryErrorNoGC();
+                    memcpy(newdata, data, dim * Log.sizeof);
+                    cstdlib.free(data);
+                    data = newdata;
+                }
+            }
+        }
+
 
         void push(Log log) nothrow @nogc
         {

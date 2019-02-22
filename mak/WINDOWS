@@ -37,7 +37,6 @@ copydir: $(IMPDIR)
 	mkdir $(IMPDIR)\core\sys\freebsd\sys
 	mkdir $(IMPDIR)\core\sys\dragonflybsd\sys
 	mkdir $(IMPDIR)\core\sys\linux\sys
-	mkdir $(IMPDIR)\core\sys\osx\mach
 	mkdir $(IMPDIR)\core\sys\posix\arpa
 	mkdir $(IMPDIR)\core\sys\posix\net
 	mkdir $(IMPDIR)\core\sys\posix\netinet
@@ -73,6 +72,9 @@ $(IMPDIR)\core\demangle.d : src\core\demangle.d
 $(IMPDIR)\core\exception.d : src\core\exception.d
 	copy $** $@
 
+$(IMPDIR)\core\lifetime.d : src\core\lifetime.d
+	copy $** $@
+
 $(IMPDIR)\core\math.d : src\core\math.d
 	copy $** $@
 
@@ -103,6 +105,9 @@ $(IMPDIR)\core\internal\arrayop.d : src\core\internal\arrayop.d
 $(IMPDIR)\core\internal\convert.d : src\core\internal\convert.d
 	copy $** $@
 
+$(IMPDIR)\core\internal\dassert.d : src\core\internal\dassert.d
+	copy $** $@
+
 $(IMPDIR)\core\internal\hash.d : src\core\internal\hash.d
 	copy $** $@
 
@@ -116,6 +121,9 @@ $(IMPDIR)\core\internal\string.d : src\core\internal\string.d
 	copy $** $@
 
 $(IMPDIR)\core\internal\traits.d : src\core\internal\traits.d
+	copy $** $@
+
+$(IMPDIR)\core\internal\utf.d : src\core\internal\utf.d
 	copy $** $@
 
 $(IMPDIR)\core\stdc\assert_.d : src\core\stdc\assert_.d
@@ -184,10 +192,34 @@ $(IMPDIR)\core\stdc\wchar_.d : src\core\stdc\wchar_.d
 $(IMPDIR)\core\stdc\wctype.d : src\core\stdc\wctype.d
 	copy $** $@
 
+$(IMPDIR)\core\stdcpp\allocator.d : src\core\stdcpp\allocator.d
+	copy $** $@
+
+$(IMPDIR)\core\stdcpp\array.d : src\core\stdcpp\array.d
+	copy $** $@
+
 $(IMPDIR)\core\stdcpp\exception.d : src\core\stdcpp\exception.d
 	copy $** $@
 
+$(IMPDIR)\core\stdcpp\new_.d : src\core\stdcpp\new_.d
+	copy $** $@
+
+$(IMPDIR)\core\stdcpp\string_view.d : src\core\stdcpp\string_view.d
+	copy $** $@
+
 $(IMPDIR)\core\stdcpp\typeinfo.d : src\core\stdcpp\typeinfo.d
+	copy $** $@
+
+$(IMPDIR)\core\stdcpp\type_traits.d : src\core\stdcpp\type_traits.d
+	copy $** $@
+
+$(IMPDIR)\core\stdcpp\xutility.d : src\core\stdcpp\xutility.d
+	copy $** $@
+
+$(IMPDIR)\core\sys\darwin\crt_externs.d : src\core\sys\darwin\crt_externs.d
+	copy $** $@
+
+$(IMPDIR)\core\sys\darwin\dlfcn.d : src\core\sys\darwin\dlfcn.d
 	copy $** $@
 
 $(IMPDIR)\core\sys\darwin\execinfo.d : src\core\sys\darwin\execinfo.d
@@ -275,6 +307,9 @@ $(IMPDIR)\core\sys\freebsd\sys\mman.d : src\core\sys\freebsd\sys\mman.d
 	copy $** $@
 
 $(IMPDIR)\core\sys\freebsd\sys\mount.d : src\core\sys\freebsd\sys\mount.d
+	copy $** $@
+
+$(IMPDIR)\core\sys\freebsd\unistd.d : src\core\sys\freebsd\unistd.d
 	copy $** $@
 
 $(IMPDIR)\core\sys\dragonflybsd\dlfcn.d : src\core\sys\dragonflybsd\dlfcn.d
@@ -412,39 +447,6 @@ $(IMPDIR)\core\sys\linux\sys\time.d : src\core\sys\linux\sys\time.d
 $(IMPDIR)\core\sys\openbsd\dlfcn.d : src\core\sys\openbsd\dlfcn.d
 	copy $** $@
 
-$(IMPDIR)\core\sys\osx\execinfo.d : src\core\sys\osx\execinfo.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\pthread.d : src\core\sys\osx\pthread.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\dyld.d : src\core\sys\osx\mach\dyld.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\getsect.d : src\core\sys\osx\mach\getsect.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\kern_return.d : src\core\sys\osx\mach\kern_return.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\loader.d : src\core\sys\osx\mach\loader.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\port.d : src\core\sys\osx\mach\port.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\semaphore.d : src\core\sys\osx\mach\semaphore.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\mach\thread_act.d : src\core\sys\osx\mach\thread_act.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\sys\cdefs.d : src\core\sys\osx\sys\cdefs.d
-	copy $** $@
-
-$(IMPDIR)\core\sys\osx\sys\mman.d : src\core\sys\osx\sys\mman.d
-	copy $** $@
-
 $(IMPDIR)\core\sys\posix\arpa\inet.d : src\core\sys\posix\arpa\inet.d
 	copy $** $@
 
@@ -506,6 +508,9 @@ $(IMPDIR)\core\sys\posix\setjmp.d : src\core\sys\posix\setjmp.d
 	copy $** $@
 
 $(IMPDIR)\core\sys\posix\signal.d : src\core\sys\posix\signal.d
+	copy $** $@
+
+$(IMPDIR)\core\sys\posix\spawn.d : src\core\sys\posix\spawn.d
 	copy $** $@
 
 $(IMPDIR)\core\sys\posix\stdio.d : src\core\sys\posix\stdio.d
