@@ -275,32 +275,6 @@ class ConservativeGC : GC
         gcLock.lock();
     }
 
-    public size_t[2] fill_memory_info() nothrow{
-        // used by tangort.stats.d
-        // TODO remove
-        size_t freeSize, usedSize;
-        foreach (pool; gcx.pooltable[0 .. gcx.npools]){
-            foreach (bin; pool.pagetable[0 .. pool.npages]){
-                if (bin == B_FREE)
-                    freeSize += PAGESIZE;
-                else
-                    usedSize += PAGESIZE;
-              }
-        }
-
-        size_t freeListSize;
-        foreach (n; 0 .. B_PAGE){
-            immutable sz = binsize[n];
-            for (List *list = gcx.bucket[n]; list; list = list.next)
-                freeListSize += sz;
-        }
-        usedSize -= freeListSize;
-        freeSize += freeListSize;
-        size_t[2] ret;
-        ret[0] = usedSize;
-        ret[1] = freeSize;
-        return ret;
-    }
 
     static void initialize(ref GC gc)
     {
@@ -1330,8 +1304,6 @@ private void set(ref PageBits bits, size_t i) @nogc pure nothrow
 
 struct Gcx
 {
-    import gc.stats;
-    Stats mystats;
     import core.internal.spinlock;
     auto rootsLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
     auto rangesLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
@@ -1370,7 +1342,6 @@ struct Gcx
         debug(INVARIANT) initialized = true;
         shouldFork = config.fork;
 
-        mystats = Stats(0);
     }
 
 
@@ -2461,9 +2432,6 @@ struct Gcx
      */
     size_t fullcollect(bool nostack = false, bool block = false) nothrow
     {
-        mystats.collection_started();
-        scope (exit)
-            mystats.collection_finished();
         MonoTime start, stop, begin;
 
         if (config.profile)
@@ -2521,7 +2489,6 @@ Lmark:
                 rangesLock.unlock();
                 rootsLock.unlock();
             }
-            mystats.world_stopped();
             thread_suspendAll();
 
             prepare();
@@ -2567,7 +2534,6 @@ Lmark:
                             break; // bogus
                     default: // the parent
                         thread_resumeAll();
-                        mystats.world_started();
                         if (!block)
                         {
                           markProcPid = pid;
@@ -2579,7 +2545,6 @@ Lmark:
                         if (r == WRes.ERROR)
                         {
                             thread_suspendAll();
-                            mystats.world_stopped();
                             // there was an error
                             // do the marking in this thread
                             disableFork();
@@ -2591,7 +2556,6 @@ Lmark:
             if(shouldFork)
                 thread_suspendAll();
             thread_processGCMarks(&isMarked);
-            mystats.world_started();
             thread_resumeAll();
         }
 
