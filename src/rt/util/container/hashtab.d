@@ -230,21 +230,21 @@ unittest
 {
     HashTab!(int, int) tab;
 
-    foreach(i; 0 .. 100)
+    foreach (i; 0 .. 100)
         tab[i] = 100 - i;
 
-    foreach(i; 0 .. 100)
+    foreach (i; 0 .. 100)
         assert(tab[i] == 100 - i);
 
     foreach (k, v; tab)
         assert(v == 100 - k);
 
-    foreach(i; 0 .. 50)
+    foreach (i; 0 .. 50)
         tab.remove(2 * i);
 
     assert(tab.length == 50);
 
-    foreach(i; 0 .. 50)
+    foreach (i; 0 .. 50)
         assert(tab[2 * i + 1] == 100 - 2 * i - 1);
 
     assert(tab.length == 50);
@@ -290,7 +290,7 @@ unittest
 
 unittest
 {
-    alias RC = common.RC;
+    alias RC = common.RC!();
     HashTab!(size_t, RC) tab;
 
     size_t cnt;

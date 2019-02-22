@@ -1694,7 +1694,6 @@ struct Gcx
         auto biti = (p - pool.baseAddr) >> pool.shiftBy;
         assert(pool.freebits.test(biti));
         pool.mark.set(biti); // be sure that the child is aware of the page being used
-
         pool.freebits.clear(biti);
         if (bits)
             pool.setBits(biti, bits);
@@ -2607,6 +2606,12 @@ Lmark:
 
             if(shouldFork)
                 thread_suspendAll();
+
+            if (ConservativeGC.isPrecise)
+                markAll!markPrecise(nostack);
+            else
+                markAll!markConservative(nostack);
+
             thread_processGCMarks(&isMarked);
             thread_resumeAll();
         }
@@ -3553,6 +3558,7 @@ struct SmallObjectPool
         void* p = baseAddr + pn * PAGESIZE;
         size_t biti = pn * (PAGESIZE / 16);
         base.freebits.set(biti);
+
         auto first = cast(List*) p;
 
         // ensure 2 <size> bytes blocks are available below ptop, one
@@ -3730,7 +3736,6 @@ debug (LOGGING)
         }
     }
 
-
     struct LogArray
     {
         size_t dim;
@@ -3769,7 +3774,6 @@ debug (LOGGING)
                 }
             }
         }
-
 
         void push(Log log) nothrow @nogc
         {

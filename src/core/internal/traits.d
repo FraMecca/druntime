@@ -13,6 +13,19 @@ template TypeTuple(TList...)
 {
     alias TypeTuple = TList;
 }
+alias AliasSeq = TypeTuple;
+
+template FieldTypeTuple(T)
+{
+    static if (is(T == struct) || is(T == union))
+        alias FieldTypeTuple = typeof(T.tupleof[0 .. $ - __traits(isNested, T)]);
+    else static if (is(T == class))
+        alias FieldTypeTuple = typeof(T.tupleof);
+    else
+    {
+        alias FieldTypeTuple = TypeTuple!T;
+    }
+}
 
 T trustedCast(T, U)(auto ref U u) @trusted pure nothrow
 {
@@ -86,7 +99,7 @@ private template substInoutForm(T)
 }
 
 /// used to declare an extern(D) function that is defined in a different module
-template externDFunc(string fqn, T:FT*, FT) if(is(FT == function))
+template externDFunc(string fqn, T:FT*, FT) if (is(FT == function))
 {
     static if (is(FT RT == return) && is(FT Args == function))
     {
@@ -123,93 +136,152 @@ template staticIota(int beg, int end)
     }
 }
 
+private struct __InoutWorkaroundStruct {}
+@property T rvalueOf(T)(inout __InoutWorkaroundStruct = __InoutWorkaroundStruct.init);
+@property ref T lvalueOf(T)(inout __InoutWorkaroundStruct = __InoutWorkaroundStruct.init);
+
+// taken from std.traits.isAssignable
+template isAssignable(Lhs, Rhs = Lhs)
+{
+    enum isAssignable = __traits(compiles, lvalueOf!Lhs = rvalueOf!Rhs) && __traits(compiles, lvalueOf!Lhs = lvalueOf!Rhs);
+}
+
+// taken from std.traits.isInnerClass
+template isInnerClass(T) if (is(T == class))
+{
+    static if (is(typeof(T.outer)))
+    {
+        template hasOuterMember(T...)
+        {
+            static if (T.length == 0)
+                enum hasOuterMember = false;
+            else
+                enum hasOuterMember = T[0] == "outer" || hasOuterMember!(T[1 .. $]);
+        }
+        enum isInnerClass = __traits(isSame, typeof(T.outer), __traits(parent, T)) && !hasOuterMember!(__traits(allMembers, T));
+    }
+    else
+        enum isInnerClass = false;
+}
+
 template dtorIsNothrow(T)
 {
     enum dtorIsNothrow = is(typeof(function{T t=void;}) : void function() nothrow);
 }
 
-/*
-Tests whether all given items satisfy a template predicate, i.e. evaluates to
-$(D F!(T[0]) && F!(T[1]) && ... && F!(T[$ - 1])).
-*/
-package(core.internal)
+// taken from std.meta.allSatisfy
 template allSatisfy(alias F, T...)
 {
-    static if (T.length == 0)
+    static foreach (Ti; T)
+    {
+        static if (!is(typeof(allSatisfy) == bool) && // not yet defined
+                   !F!(Ti))
+        {
+            enum allSatisfy = false;
+        }
+    }
+    static if (!is(typeof(allSatisfy) == bool)) // if not yet defined
     {
         enum allSatisfy = true;
     }
-    else static if (T.length == 1)
-    {
-        enum allSatisfy = F!(T[0]);
-    }
-    else
-    {
-        static if (allSatisfy!(F, T[0  .. $/2]))
-            enum allSatisfy = allSatisfy!(F, T[$/2 .. $]);
-        else
-            enum allSatisfy = false;
-    }
 }
 
+// taken from std.meta.anySatisfy
 template anySatisfy(alias F, T...)
 {
-    static if (T.length == 0)
+    static foreach (Ti; T)
+    {
+        static if (!is(typeof(anySatisfy) == bool) && // not yet defined
+                   F!(Ti))
+        {
+            enum anySatisfy = true;
+        }
+    }
+    static if (!is(typeof(anySatisfy) == bool)) // if not yet defined
     {
         enum anySatisfy = false;
     }
-    else static if (T.length == 1)
-    {
-        enum anySatisfy = F!(T[0]);
-    }
+}
+
+// simplified from std.traits.maxAlignment
+template maxAlignment(U...)
+{
+    static if (U.length == 0)
+        static assert(0);
+    else static if (U.length == 1)
+        enum maxAlignment = U[0].alignof;
+    else static if (U.length == 2)
+        enum maxAlignment = U[0].alignof > U[1].alignof ? U[0].alignof : U[1].alignof;
     else
     {
-        enum anySatisfy =
-            anySatisfy!(F, T[ 0  .. $/2]) ||
-            anySatisfy!(F, T[$/2 ..  $ ]);
+        enum a = maxAlignment!(U[0 .. ($+1)/2]);
+        enum b = maxAlignment!(U[($+1)/2 .. $]);
+        enum maxAlignment = a > b ? a : b;
     }
 }
 
-// Somehow fails for non-static nested structs without support for aliases
-template hasElaborateDestructor(T...)
+// std.traits.Fields
+template Fields(T)
 {
-    static if (is(T[0]))
-        alias S = T[0];
+    static if (is(T == struct) || is(T == union))
+        alias Fields = typeof(T.tupleof[0 .. $ - __traits(isNested, T)]);
+    else static if (is(T == class))
+        alias Fields = typeof(T.tupleof);
     else
-        alias S = typeof(T[0]);
+        alias Fields = TypeTuple!T;
+}
 
-    static if (is(S : E[n], E, size_t n) && S.length)
+// std.traits.hasElaborateDestructor
+template hasElaborateDestructor(S)
+{
+    static if (__traits(isStaticArray, S) && S.length)
     {
-        enum bool hasElaborateDestructor = hasElaborateDestructor!E;
+        enum bool hasElaborateDestructor = hasElaborateDestructor!(typeof(S.init[0]));
     }
     else static if (is(S == struct))
     {
         enum hasElaborateDestructor = __traits(hasMember, S, "__dtor")
-            || anySatisfy!(.hasElaborateDestructor, S.tupleof);
+            || anySatisfy!(.hasElaborateDestructor, Fields!S);
     }
     else
+    {
         enum bool hasElaborateDestructor = false;
+    }
 }
 
-// Somehow fails for non-static nested structs without support for aliases
-template hasElaborateCopyConstructor(T...)
+// std.traits.hasElaborateCopyDestructor
+template hasElaborateCopyConstructor(S)
 {
-    static if (is(T[0]))
-        alias S = T[0];
-    else
-        alias S = typeof(T[0]);
-
-    static if (is(S : E[n], E, size_t n) && S.length)
+    static if (__traits(isStaticArray, S) && S.length)
     {
-        enum bool hasElaborateCopyConstructor = hasElaborateCopyConstructor!E;
+        enum bool hasElaborateCopyConstructor = hasElaborateCopyConstructor!(typeof(S.init[0]));
     }
     else static if (is(S == struct))
     {
-        enum hasElaborateCopyConstructor = __traits(hasMember, S, "__postblit")
-            || anySatisfy!(.hasElaborateCopyConstructor, S.tupleof);
+        enum hasElaborateCopyConstructor = __traits(hasMember, S, "__xpostblit");
     }
     else
+    {
         enum bool hasElaborateCopyConstructor = false;
+    }
+}
+
+template hasElaborateAssign(S)
+{
+    static if (__traits(isStaticArray, S) && S.length)
+    {
+        enum bool hasElaborateAssign = hasElaborateAssign!(typeof(S.init[0]));
+    }
+    else static if (is(S == struct))
+    {
+        enum hasElaborateAssign = is(typeof(S.init.opAssign(rvalueOf!S))) ||
+                                  is(typeof(S.init.opAssign(lvalueOf!S))) ||
+                                  anySatisfy!(.hasElaborateAssign, FieldTypeTuple!S);
+    }
+    else
+    {
+        enum bool hasElaborateAssign = false;
+    }
 }
 
 // std.meta.Filter
@@ -253,4 +325,12 @@ template staticMap(alias F, T...)
                 staticMap!(F, T[ 0  .. $/2]),
                 staticMap!(F, T[$/2 ..  $ ]));
     }
+}
+
+// std.exception.assertCTFEable
+version (unittest) package(core)
+void assertCTFEable(alias dg)()
+{
+    static assert({ cast(void) dg(); return true; }());
+    cast(void) dg();
 }
