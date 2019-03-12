@@ -1076,7 +1076,7 @@ class ConservativeGC : GC
     {
         // Since a finalizer could launch a new thread, we always need to lock
         // when collecting.
-        static size_t go(Gcx* gcx, bool block) nothrow
+        static size_t go(Gcx* gcx) nothrow
         {
             return gcx.fullcollect(true, true); // standard stop the world
         }
