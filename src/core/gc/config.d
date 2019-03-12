@@ -35,7 +35,7 @@ struct Config
 
     void help() @nogc nothrow
     {
-        import gc.registry : registeredGCFactories;
+        import core.gc.registry : registeredGCFactories;
 
         printf("GC options are specified as white space separated assignments:
     disable:0|1    - start disabled (%d)
