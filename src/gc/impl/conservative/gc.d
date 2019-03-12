@@ -1026,21 +1026,9 @@ class ConservativeGC : GC
     }
 
 
-    void collect(bool block = true) nothrow
-    {
-        fullCollect(block);
-    }
-
-
     void collect() nothrow
     {
         fullCollect();
-    }
-
-
-    void collectNoStack(bool block = true) nothrow
-    {
-        fullCollectNoStack(block);
     }
 
 
@@ -1055,7 +1043,7 @@ class ConservativeGC : GC
      The collection is done concurrently only if block is false.
      * Return number of pages free'd.
      */
-    size_t fullCollect(bool block = true) nothrow
+    size_t fullCollect() nothrow
     {
         debug(PRINTF) printf("GC.fullCollect()\n");
 
@@ -1063,7 +1051,7 @@ class ConservativeGC : GC
         // when collecting.
         static size_t go(Gcx* gcx) nothrow
         {
-            return gcx.fullcollect();
+            return gcx.fullcollect(false, true); // standard stop the world
         }
         immutable result = runLocked!go(gcx);
 
@@ -1084,15 +1072,15 @@ class ConservativeGC : GC
     /**
      * do full garbage collection ignoring roots
      */
-    void fullCollectNoStack(bool block = true) nothrow
+    void fullCollectNoStack() nothrow
     {
         // Since a finalizer could launch a new thread, we always need to lock
         // when collecting.
         static size_t go(Gcx* gcx, bool block) nothrow
         {
-            return gcx.fullcollect(true, block);
+            return gcx.fullcollect(true, true); // standard stop the world
         }
-        runLocked!go(gcx, block);
+        runLocked!go(gcx);
     }
 
 
