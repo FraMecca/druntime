@@ -1657,15 +1657,11 @@ struct Gcx
                 if (!newPool(1, false))
                 {
                     // out of memory => try to free some memory
-                    if (lowMem)
-                        shouldMinimize = true;
                     fullcollect(false, true); // stop the worlds
                 }
             }
             else
             {
-                if (lowMem)
-                    shouldMinimize = true;
                 fullcollect();
             }
             // tryAlloc will succeed if a new pool was allocated above, if it fails allocate a new pool now
@@ -2632,7 +2628,7 @@ Lmark:
         updateCollectThresholds();
         // minimize() should be called only after a call to fullcollect
         // terminates with a sweep
-        if (shouldMinimize)
+        if (shouldMinimize || lowMem)
         {
             shouldMinimize = false;
             minimize();
