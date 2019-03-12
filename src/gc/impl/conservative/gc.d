@@ -1761,8 +1761,8 @@ struct Gcx
         if (npages > 1)
             memset(&pool.pagetable[pn + 1], B_PAGEPLUS, npages - 1);
         pool.mark.set(pn);
-        // pool.updateOffsets(pn);
         usedLargePages += npages;
+		pool.freepages -= npages;
 
         debug(PRINTF) printFreeInfo(&pool.base);
 
@@ -2531,10 +2531,10 @@ Lmark:
             // and the mark is done in this thread.
             if (!shouldFork)
             {
-		if (ConservativeGC.isPrecise)
-		    markAll!markPrecise(nostack);
-		else
-		    markAll!markConservative(nostack);
+				if (ConservativeGC.isPrecise)
+					markAll!markPrecise(nostack);
+				else
+					markAll!markConservative(nostack);
 	    }
             // Forking is enabled, so we fork() and start a new concurrent mark phase
             // in the child. If the collection should not block, the parent process
@@ -2558,13 +2558,13 @@ Lmark:
                         disableFork();
                         goto Lmark;
                     case 0: // child process
-			    if (ConservativeGC.isPrecise)
-				markAll!markPrecise(nostack);
-			    else
-				markAll!markConservative(nostack);
-                            _Exit(0);
-                            break; // bogus
-                    default: // the parent
+						if (ConservativeGC.isPrecise)
+							markAll!markPrecise(nostack);
+						else
+							markAll!markConservative(nostack);
+						_Exit(0);
+						break; // bogus
+					default: // the parent
                         thread_resumeAll();
                         if (!block)
                         {
@@ -2579,12 +2579,12 @@ Lmark:
                             thread_suspendAll();
                             // there was an error
                             // do the marking in this thread
-                            disableFork();
-			    if (ConservativeGC.isPrecise)
-				markAll!markPrecise(nostack);
-			    else
-				markAll!markConservative(nostack);
-                        }
+							disableFork();
+							if (ConservativeGC.isPrecise)
+								markAll!markPrecise(nostack);
+							else
+								markAll!markConservative(nostack);
+						}
                 }
             }
 
@@ -2595,7 +2595,11 @@ Lmark:
             thread_resumeAll();
         }
 
-        stop = currTime;
+		// If we reach here, the child process has finished the marking phase
+		// or block == true and we are using standard stop the world collection.
+		// It is time to sweep
+
+		stop = currTime;
         markTime += (stop - start);
         Duration pause = stop - begin;
         if (pause > maxPauseTime)
