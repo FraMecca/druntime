@@ -5,7 +5,7 @@
 * License:   $(HTTP www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 */
 
-module gc.config;
+module core.gc.config;
 
 import core.stdc.stdio;
 import core.internal.parseoptions;
