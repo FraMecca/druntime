@@ -1762,7 +1762,7 @@ struct Gcx
             memset(&pool.pagetable[pn + 1], B_PAGEPLUS, npages - 1);
         pool.mark.set(pn);
         usedLargePages += npages;
-		pool.freepages -= npages;
+        pool.freepages -= npages;
 
         debug(PRINTF) printFreeInfo(&pool.base);
 
@@ -2531,11 +2531,11 @@ Lmark:
             // and the mark is done in this thread.
             if (!shouldFork)
             {
-				if (ConservativeGC.isPrecise)
-					markAll!markPrecise(nostack);
-				else
-					markAll!markConservative(nostack);
-	    }
+                if (ConservativeGC.isPrecise)
+                    markAll!markPrecise(nostack);
+                else
+                    markAll!markConservative(nostack);
+        }
             // Forking is enabled, so we fork() and start a new concurrent mark phase
             // in the child. If the collection should not block, the parent process
             // tells the caller no memory could be recycled immediately (if this collection
@@ -2558,11 +2558,11 @@ Lmark:
                         disableFork();
                         goto Lmark;
                     case 0: // child process
-						if (ConservativeGC.isPrecise)
-							markAll!markPrecise(nostack);
-						else
-							markAll!markConservative(nostack);
-						_Exit(0);
+                        if (ConservativeGC.isPrecise)
+                            markAll!markPrecise(nostack);
+                        else
+                            markAll!markConservative(nostack);
+                        _Exit(0);
 						break; // bogus
 					default: // the parent
                         thread_resumeAll();
@@ -2580,11 +2580,11 @@ Lmark:
                             // there was an error
                             // do the marking in this thread
 							disableFork();
-							if (ConservativeGC.isPrecise)
-								markAll!markPrecise(nostack);
-							else
-								markAll!markConservative(nostack);
-						}
+                            if (ConservativeGC.isPrecise)
+                                markAll!markPrecise(nostack);
+                            else
+                                markAll!markConservative(nostack);
+                        }
                 }
             }
 
