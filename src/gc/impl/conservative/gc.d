@@ -41,6 +41,7 @@ import core.gc.gcinterface;
 import rt.util.container.treap;
 
 import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
+import core.stdc.stdio : fflush;
 import core.stdc.string : memcpy, memset, memmove;
 import core.bitop;
 import core.thread;
@@ -53,6 +54,52 @@ else                   import core.stdc.stdio : sprintf, printf; // needed to ou
 
 import core.time;
 alias currTime = MonoTime.currTime;
+
+extern (C) nothrow @nogc
+{
+    void _Exit(int);
+}
+
+debug(PRINTF_TO_FILE)
+{
+    private __gshared MonoTime gcStartTick;
+    private __gshared FILE* gcx_fh;
+
+    private int printf(ARGS...)(const char* fmt, ARGS args) nothrow
+    {
+        if (!gcx_fh)
+            gcx_fh = fopen("gcx.log", "w");
+        if (!gcx_fh)
+            return 0;
+
+        int len;
+        if (MonoTime.ticksPerSecond == 0)
+        {
+            len = fprintf(gcx_fh, "before init: ");
+        }
+        else
+        {
+            if (gcStartTick == MonoTime.init)
+                gcStartTick = MonoTime.currTime;
+            immutable timeElapsed = MonoTime.currTime - gcStartTick;
+            immutable secondsAsDouble = timeElapsed.total!"hnsecs" / cast(double)convert!("seconds", "hnsecs")(1);
+            len = fprintf(gcx_fh, "%10.6lf: ", secondsAsDouble);
+        }
+        len += fprintf(gcx_fh, fmt, args);
+        fflush(gcx_fh);
+        return len;
+    }
+}
+
+debug(PRINTF) void printFreeInfo(Pool* pool) nothrow
+{
+    uint nReallyFree;
+    foreach(i; 0..pool.npages) {
+        if(pool.pagetable[i] >= B_FREE) nReallyFree++;
+    }
+
+    printf("Pool %p:  %d really free, %d supposedly free\n", pool, nReallyFree, pool.freepages);
+}
 
 // Track total time spent preparing for GC,
 // marking, sweeping and recovering pages.
@@ -750,6 +797,7 @@ class ConservativeGC : GC
 
             list.next = gcx.bucket[bin];
             list.pool = pool;
+            pool.freebits.set(biti);
             gcx.bucket[bin] = list;
             pool.freebits.set(biti);
         }
@@ -992,6 +1040,7 @@ class ConservativeGC : GC
 
     /**
      * Do full garbage collection.
+     The collection is done concurrently only if block is false.
      * Return number of pages free'd.
      */
     size_t fullCollect() nothrow
@@ -1002,7 +1051,7 @@ class ConservativeGC : GC
         // when collecting.
         static size_t go(Gcx* gcx) nothrow
         {
-            return gcx.fullcollect();
+            return gcx.fullcollect(false, true); // standard stop the world
         }
         immutable result = runLocked!go(gcx);
 
@@ -1029,7 +1078,7 @@ class ConservativeGC : GC
         // when collecting.
         static size_t go(Gcx* gcx) nothrow
         {
-            return gcx.fullcollect(true);
+            return gcx.fullcollect(true, true); // standard stop the world
         }
         runLocked!go(gcx);
     }
@@ -1187,6 +1236,9 @@ struct Gcx
     auto rangesLock = shared(AlignedSpinLock)(SpinLock.Contention.brief);
     Treap!Root roots;
     Treap!Range ranges;
+    private pid_t markProcPid = 0;
+    private bool shouldFork = true;
+    private bool shouldMinimize = false;
 
     debug(INVARIANT) bool initialized;
     debug(INVARIANT) bool inCollection;
@@ -1220,6 +1272,8 @@ struct Gcx
         mappedPages = 0;
         //printf("gcx = %p, self = %x\n", &this, self);
         debug(INVARIANT) initialized = true;
+        shouldFork = config.fork;
+
     }
 
 
@@ -1328,6 +1382,11 @@ struct Gcx
                 }
             }
         }
+    }
+
+    @property bool collectInProgress() const nothrow
+    {
+        return markProcPid != 0;
     }
 
 
@@ -1598,14 +1657,12 @@ struct Gcx
                 if (!newPool(1, false))
                 {
                     // out of memory => try to free some memory
-                    fullcollect();
-                    if (lowMem) minimize();
+                    fullcollect(false, true); // stop the worlds
                 }
             }
             else
             {
                 fullcollect();
-                if (lowMem) minimize();
             }
             // tryAlloc will succeed if a new pool was allocated above, if it fails allocate a new pool now
             if (!tryAlloc() && (!newPool(1, false) || !tryAlloc()))
@@ -1617,8 +1674,10 @@ struct Gcx
         // Return next item from free list
         bucket[bin] = (cast(List*)p).next;
         auto pool = (cast(List*)p).pool;
+
         auto biti = (p - pool.baseAddr) >> pool.shiftBy;
         assert(pool.freebits.test(biti));
+        pool.mark.set(biti); // be sure that the child is aware of the page being used
         pool.freebits.clear(biti);
         if (bits)
             pool.setBits(biti, bits);
@@ -1681,14 +1740,14 @@ struct Gcx
                 if (!tryAllocNewPool())
                 {
                     // disabled but out of memory => try to free some memory
-                    fullcollect();
-                    minimize();
+                    shouldMinimize = true;
+                    fullcollect(false, true);
                 }
             }
             else
             {
+                shouldMinimize = true;
                 fullcollect();
-                minimize();
             }
             // If alloc didn't yet succeed retry now that we collected/minimized
             if (!pool && !tryAlloc() && !tryAllocNewPool())
@@ -1698,7 +1757,12 @@ struct Gcx
         assert(pool);
 
         debug(PRINTF) printFreeInfo(&pool.base);
+        pool.pagetable[pn] = B_PAGE;
+        if (npages > 1)
+            memset(&pool.pagetable[pn + 1], B_PAGEPLUS, npages - 1);
+        pool.mark.set(pn);
         usedLargePages += npages;
+        pool.freepages -= npages;
 
         debug(PRINTF) printFreeInfo(&pool.base);
 
@@ -1766,6 +1830,8 @@ struct Gcx
         if (pool)
         {
             pool.initialize(npages, isLargeObject);
+            if (collectInProgress)
+                pool.mark.setAll();
             if (!pool.baseAddr || !pooltable.insert(pool))
             {
                 pool.Dtor();
@@ -2273,6 +2339,7 @@ struct Gcx
                                 void* q = sentinel_add(p);
                                 sentinel_Invariant(q);
 
+                                pool.freebits.set(biti);
                                 if (pool.finals.nbits && pool.finals.test(biti))
                                     rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
 
@@ -2341,6 +2408,7 @@ struct Gcx
                             goto Lnotfree;
                     }
                     pool.pagetable[pn] = B_FREE;
+                    pool.freebits.set(bitbase);
                     if (pn < pool.searchStart) pool.searchStart = pn;
                     pool.freepages++;
                     freedSmallPages++;
@@ -2372,10 +2440,16 @@ struct Gcx
         return freedSmallPages;
     }
 
+    void disableFork() nothrow
+    {
+        shouldFork = false;
+        markProcPid = 0;
+    }
+
     /**
      * Return number of full pages free'd.
      */
-    size_t fullcollect(bool nostack = false) nothrow
+    size_t fullcollect(bool nostack = false, bool block = false) nothrow
     {
         // It is possible that `fullcollect` will be called from a thread which
         // is not yet registered in runtime (because allocating `new Thread` is
@@ -2395,7 +2469,45 @@ struct Gcx
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
 
+        // If there is a mark process running, check if it already finished.
+        // If that is the case, we move to the sweep phase.
+        // If it's still running, either we block until the mark phase is
+        // done (and then sweep to finish the collection), or in case of error
+        // we redo the mark phase without forking.
+        if (collectInProgress)
         {
+            WRes rc = wait_pid(markProcPid, block);
+            switch (rc)
+            {
+                case WRes.DONE:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc DONE (block=%d)\n",
+                                                  cast(int) block);
+                    markProcPid = 0;
+                    // process GC marks then sweep
+                    thread_suspendAll();
+                    thread_processGCMarks(&isMarked);
+                    thread_resumeAll();
+                    break;
+                case WRes.RUNNING:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc RUNNING\n");
+                    if (!block)
+                        return 0;
+                    // Something went wrong, if block is true, wait() should never
+                    // returned RUNNING.
+                    goto case WRes.ERROR;
+                case WRes.ERROR:
+                    debug(COLLECT_PRINTF) printf("\t\tmark proc ERROR\n");
+                    // Try to keep going without forking
+                    // and do the marking in this thread
+                    disableFork();
+                    goto Lmark;
+                default:
+                    assert(false, "Unknown wait_pid() result");
+            }
+        }
+        else
+        {
+Lmark:
             // lock roots and ranges around suspending threads b/c they're not reentrant safe
             rangesLock.lock();
             rootsLock.lock();
@@ -2414,16 +2526,80 @@ struct Gcx
             prepTime += (stop - start);
             start = stop;
 
-            if (ConservativeGC.isPrecise)
-                markAll!markPrecise(nostack);
+            // Forking is not enabled.
+            // This is a standard stop the world collection
+            // and the mark is done in this thread.
+            if (!shouldFork)
+            {
+                if (ConservativeGC.isPrecise)
+                    markAll!markPrecise(nostack);
+                else
+                    markAll!markConservative(nostack);
+        }
+            // Forking is enabled, so we fork() and start a new concurrent mark phase
+            // in the child. If the collection should not block, the parent process
+            // tells the caller no memory could be recycled immediately (if this collection
+            // was triggered by an allocation, the caller should allocate more memory
+            // to fulfill the request).
+            // If the collection should block, the parent will wait for the mark phase
+            // to finish before returning control to the mutator,
+            // but other threads are restarted and may run in parallel with the mark phase
+            // (unless they allocate or use the GC themselves, in which case
+            // the global GC lock will stop them).
             else
-                markAll!markConservative(nostack);
+            {
+                // fork now and sweep later
+                fflush(null); // avoid duplicated FILE* output
+                auto pid = fork();
+                assert(pid != -1); // TODO handle case
+                switch (pid)
+                {
+                    case -1: // fork() failed, retry without forking
+                        disableFork();
+                        goto Lmark;
+                    case 0: // child process
+                        if (ConservativeGC.isPrecise)
+                            markAll!markPrecise(nostack);
+                        else
+                            markAll!markConservative(nostack);
+                        _Exit(0);
+						break; // bogus
+					default: // the parent
+                        thread_resumeAll();
+                        if (!block)
+                        {
+                          markProcPid = pid;
+                          return 0;
+                        }
+                        WRes r = wait_pid(pid); // block until marking is done
+                        assert(r == WRes.DONE);
+                        assert(r != WRes.RUNNING);
+                        if (r == WRes.ERROR)
+                        {
+                            thread_suspendAll();
+                            // there was an error
+                            // do the marking in this thread
+							disableFork();
+                            if (ConservativeGC.isPrecise)
+                                markAll!markPrecise(nostack);
+                            else
+                                markAll!markConservative(nostack);
+                        }
+                }
+            }
+
+            if(shouldFork)
+                thread_suspendAll();
 
             thread_processGCMarks(&isMarked);
             thread_resumeAll();
         }
 
-        stop = currTime;
+		// If we reach here, the child process has finished the marking phase
+		// or block == true and we are using standard stop the world collection.
+		// It is time to sweep
+
+		stop = currTime;
         markTime += (stop - start);
         Duration pause = stop - begin;
         if (pause > maxPauseTime)
@@ -2454,6 +2630,13 @@ struct Gcx
         ++numCollections;
 
         updateCollectThresholds();
+        // minimize() should be called only after a call to fullcollect
+        // terminates with a sweep
+        if (shouldMinimize || lowMem)
+        {
+            shouldMinimize = false;
+            minimize();
+        }
 
         return freedLargePages + freedSmallPages;
     }
@@ -2574,7 +2757,7 @@ struct Pool
         topAddr = baseAddr + poolsize;
         auto nbits = cast(size_t)poolsize >> shiftBy;
 
-        mark.alloc(nbits);
+        mark.alloc(nbits, true);
         if (ConservativeGC.isPrecise)
         {
             if (isLargeObject)
@@ -2598,6 +2781,7 @@ struct Pool
             freebits.alloc(nbits);
             freebits.setRange(0, nbits);
         }
+        freebits.setAll();
 
         noscan.alloc(nbits);
         appendable.alloc(nbits);
@@ -3355,6 +3539,9 @@ struct SmallObjectPool
         // Convert page to free list
         size_t size = binsize[bin];
         void* p = baseAddr + pn * PAGESIZE;
+        size_t biti = pn * (PAGESIZE / 16);
+        base.freebits.set(biti);
+
         auto first = cast(List*) p;
 
         // ensure 2 <size> bytes blocks are available below ptop, one
@@ -3532,6 +3719,245 @@ debug (LOGGING)
         }
     }
 
+// we can assume the name is always from a literal, so it is zero terminated
+debug(PRINTF)
+string debugTypeName(const(TypeInfo) ti) nothrow
+{
+    string name;
+    if (ti is null)
+        name = "null";
+    else if (auto ci = cast(TypeInfo_Class)ti)
+        name = ci.name;
+    else if (auto si = cast(TypeInfo_Struct)ti)
+        name = si.name;
+    else if (auto ci = cast(TypeInfo_Const)ti)
+        static if (__traits(compiles,ci.base)) // different whether compiled with object.di or object.d
+            return debugTypeName(ci.base);
+        else
+            return debugTypeName(ci.next);
+    else
+        name = ti.classinfo.name;
+    return name;
+}
+
+/* ======================= Leak Detector =========================== */
+
+debug (LOGGING)
+{
+    struct Log
+    {
+        void*  p;
+        size_t size;
+        size_t line;
+        char*  file;
+        void*  parent;
+
+        void print() nothrow
+        {
+            printf("    p = %p, size = %lld, parent = %p ", p, cast(ulong)size, parent);
+            if (file)
+            {
+                printf("%s(%u)", file, line);
+            }
+            printf("\n");
+        }
+    }
+
+    struct LogArray
+    {
+        size_t dim;
+        size_t allocdim;
+        Log *data;
+
+        void Dtor() nothrow @nogc
+        {
+            if (data)
+                cstdlib.free(data);
+            data = null;
+        }
+
+        void reserve(size_t nentries) nothrow @nogc
+        {
+            assert(dim <= allocdim);
+            if (allocdim - dim < nentries)
+            {
+                allocdim = (dim + nentries) * 2;
+                assert(dim + nentries <= allocdim);
+                if (!data)
+                {
+                    data = cast(Log*)cstdlib.malloc(allocdim * Log.sizeof);
+                    if (!data && allocdim)
+                        onOutOfMemoryErrorNoGC();
+                }
+                else
+                {   Log *newdata;
+
+                    newdata = cast(Log*)cstdlib.malloc(allocdim * Log.sizeof);
+                    if (!newdata && allocdim)
+                        onOutOfMemoryErrorNoGC();
+                    memcpy(newdata, data, dim * Log.sizeof);
+                    cstdlib.free(data);
+                    data = newdata;
+                }
+            }
+        }
+
+        void push(Log log) nothrow @nogc
+        {
+            reserve(1);
+            data[dim++] = log;
+        }
+
+        void remove(size_t i) nothrow @nogc
+        {
+            memmove(data + i, data + i + 1, (dim - i) * Log.sizeof);
+            dim--;
+        }
+
+
+        size_t find(void *p) nothrow @nogc
+        {
+            for (size_t i = 0; i < dim; i++)
+            {
+                if (data[i].p == p)
+                    return i;
+            }
+            return OPFAIL; // not found
+        }
+
+
+        void copy(LogArray *from) nothrow @nogc
+        {
+            if (allocdim < from.dim)
+                reserve(from.dim - dim);
+            assert(from.dim <= allocdim);
+            memcpy(data, from.data, from.dim * Log.sizeof);
+            dim = from.dim;
+        }
+    }
+
+    struct LeakDetector
+    {
+        Gcx* gcx;
+        LogArray current;
+        LogArray prev;
+
+        private void initialize(Gcx* gc)
+        {
+            gcx = gc;
+            //debug(PRINTF) printf("+log_init()\n");
+            current.reserve(1000);
+            prev.reserve(1000);
+            //debug(PRINTF) printf("-log_init()\n");
+        }
+
+
+        private void log_malloc(void *p, size_t size) nothrow
+        {
+            //debug(PRINTF) printf("+log_malloc(p = %p, size = %zd)\n", p, size);
+            Log log;
+
+            log.p = p;
+            log.size = size;
+            log.line = ConservativeGC.line;
+            log.file = ConservativeGC.file;
+            log.parent = null;
+
+            ConservativeGC.line = 0;
+            ConservativeGC.file = null;
+
+            current.push(log);
+            //debug(PRINTF) printf("-log_malloc()\n");
+        }
+
+
+        private void log_free(void *p) nothrow @nogc
+        {
+            //debug(PRINTF) printf("+log_free(%p)\n", p);
+            auto i = current.find(p);
+            if (i == OPFAIL)
+            {
+                debug(PRINTF) printf("free'ing unallocated memory %p\n", p);
+            }
+            else
+                current.remove(i);
+            //debug(PRINTF) printf("-log_free()\n");
+        }
+
+
+        private void log_collect() nothrow
+        {
+            //debug(PRINTF) printf("+log_collect()\n");
+            // Print everything in current that is not in prev
+
+            debug(PRINTF) printf("New pointers this cycle: --------------------------------\n");
+            size_t used = 0;
+            for (size_t i = 0; i < current.dim; i++)
+            {
+                auto j = prev.find(current.data[i].p);
+                if (j == OPFAIL)
+                    current.data[i].print();
+                else
+                    used++;
+            }
+
+            debug(PRINTF) printf("All roots this cycle: --------------------------------\n");
+            for (size_t i = 0; i < current.dim; i++)
+            {
+                void* p = current.data[i].p;
+                if (!gcx.findPool(current.data[i].parent))
+                {
+                    auto j = prev.find(current.data[i].p);
+                    debug(PRINTF) printf(j == OPFAIL ? "N" : " ");
+                    current.data[i].print();
+                }
+            }
+
+            debug(PRINTF) printf("Used = %d-------------------------------------------------\n", used);
+            prev.copy(&current);
+
+            debug(PRINTF) printf("-log_collect()\n");
+        }
+
+
+        private void log_parent(void *p, void *parent) nothrow
+        {
+            //debug(PRINTF) printf("+log_parent()\n");
+            auto i = current.find(p);
+            if (i == OPFAIL)
+            {
+                debug(PRINTF) printf("parent'ing unallocated memory %p, parent = %p\n", p, parent);
+                Pool *pool;
+                pool = gcx.findPool(p);
+                assert(pool);
+                size_t offset = cast(size_t)(p - pool.baseAddr);
+                size_t biti;
+                size_t pn = offset / PAGESIZE;
+                Bins bin = cast(Bins)pool.pagetable[pn];
+                biti = (offset & (PAGESIZE - 1)) >> pool.shiftBy;
+                debug(PRINTF) printf("\tbin = %d, offset = x%x, biti = x%x\n", bin, offset, biti);
+            }
+            else
+            {
+                current.data[i].parent = parent;
+            }
+            //debug(PRINTF) printf("-log_parent()\n");
+        }
+    }
+}
+else
+{
+    struct LeakDetector
+    {
+        static void initialize(Gcx* gcx) nothrow { }
+        static void log_malloc(void *p, size_t size) nothrow { }
+        static void log_free(void *p) nothrow @nogc { }
+        static void log_collect() nothrow { }
+        static void log_parent(void *p, void *parent) nothrow { }
+    }
+}
+
+/* ============================ SENTINEL =============================== */
 
     struct LogArray
     {

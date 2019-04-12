@@ -33,6 +33,13 @@ private
     __gshared GC proxiedGC; // used to iterate roots of Windows DLLs
 }
 
+public GC getInstance()
+{
+    // TODO remove
+    // used in Stats.d from tangort
+    return instance;
+}
+
 extern (C)
 {
     // do not import GC modules, they might add a dependency to this whole module
