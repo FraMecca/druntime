@@ -2501,6 +2501,7 @@ struct Gcx
         // prepend to buckets, but with forward addresses inside the page
         assert(bucket[bin] is null);
         List** bucketTail = &bucket[bin];
+
         void* p = pool.baseAddr + pn * PAGESIZE;
         const top = PAGESIZE - size + 1; // ensure <size> bytes available even if unaligned
         for (size_t u = 0; u < top; u += size)
@@ -2517,6 +2518,7 @@ struct Gcx
         return true;
     }
 
+>>>>>>> upstream/master
     bool recoverNextPage(Bins bin) nothrow
     {
         SmallObjectPool* pool = recoverPool[bin];
@@ -2553,6 +2555,7 @@ struct Gcx
         shouldFork = false;
         markProcPid = 0;
     }
+
 
     /**
      * Return number of full pages free'd.
