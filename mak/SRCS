@@ -68,6 +68,7 @@ SRCS=\
 	src\core\sync\condition.d \
 	src\core\sync\config.d \
 	src\core\sync\exception.d \
+	src\core\sync\event.d \
 	src\core\sync\mutex.d \
 	src\core\sync\rwmutex.d \
 	src\core\sync\semaphore.d \
@@ -406,7 +407,6 @@ SRCS=\
 	src\rt\adi.d \
 	src\rt\alloca.d \
 	src\rt\arrayassign.d \
-	src\rt\arraycast.d \
 	src\rt\arraycat.d \
 	src\rt\cast_.d \
 	src\rt\cmath2.d \
@@ -426,7 +426,6 @@ SRCS=\
 	src\rt\memset.d \
 	src\rt\minfo.d \
 	src\rt\monitor_.d \
-	src\rt\obj.d \
 	src\rt\profilegc.d \
 	src\rt\qsort.d \
 	src\rt\sections.d \
