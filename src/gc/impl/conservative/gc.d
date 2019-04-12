@@ -2432,16 +2432,10 @@ struct Gcx
                             {
                                 immutable biti = base + i;
 
-// <<<<<<< HEAD
-//                                 pool.freebits.set(biti);
-//                                 if (pool.finals.nbits && pool.finals.test(biti))
-//                                     rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
-// =======
-//                                 if (!pool.mark.test(biti))
+                                if (!pool.mark.test(biti))
                                 {
                                     void* q = sentinel_add(p);
                                     sentinel_Invariant(q);
-// >>>>>>> upstream/master
 
                                     if (pool.finals.nbits && pool.finals.test(biti))
                                         rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
@@ -2507,30 +2501,7 @@ struct Gcx
         // prepend to buckets, but with forward addresses inside the page
         assert(bucket[bin] is null);
         List** bucketTail = &bucket[bin];
-
-// <<<<<<< HEAD
-//                 if (bin < B_PAGE)
-//                 {
-//                     size_t size = binsize[bin];
-//                     size_t bitstride = size / 16;
-//                     size_t bitbase = pn * (PAGESIZE / 16);
-//                     size_t bittop = bitbase + (PAGESIZE / 16) - bitstride + 1;
-//                     void*  p;
-
-//                     biti = bitbase;
-//                     for (biti = bitbase; biti < bittop; biti += bitstride)
-//                     {
-//                         if (!pool.freebits.test(biti))
-//                             goto Lnotfree;
-//                     }
-//                     pool.pagetable[pn] = B_FREE;
-//                     pool.freebits.set(bitbase);
-//                     if (pn < pool.searchStart) pool.searchStart = pn;
-//                     pool.freepages++;
-//                     freedSmallPages++;
-//                     continue;
-// =======
-//         void* p = pool.baseAddr + pn * PAGESIZE;
+        void* p = pool.baseAddr + pn * PAGESIZE;
         const top = PAGESIZE - size + 1; // ensure <size> bytes available even if unaligned
         for (size_t u = 0; u < top; u += size)
         {
@@ -2545,7 +2516,6 @@ struct Gcx
         assert(bucket[bin] !is null);
         return true;
     }
-// >>>>>>> upstream/master
 
     bool recoverNextPage(Bins bin) nothrow
     {
