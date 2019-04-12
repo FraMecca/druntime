@@ -106,7 +106,6 @@ debug(PRINTF) void printFreeInfo(Pool* pool) nothrow
 __gshared Duration prepTime;
 __gshared Duration markTime;
 __gshared Duration sweepTime;
-__gshared Duration recoverTime;
 __gshared Duration pauseTime;
 __gshared Duration maxPauseTime;
 __gshared Duration maxCollectionTime;
@@ -136,8 +135,8 @@ private
 
         // Declared as an extern instead of importing core.exception
         // to avoid inlining - see issue 13725.
-        void onInvalidMemoryOperationError() @nogc nothrow;
-        void onOutOfMemoryErrorNoGC() @nogc nothrow;
+        void onInvalidMemoryOperationError(void* pretend_sideffect = null) @trusted pure nothrow @nogc;
+        void onOutOfMemoryErrorNoGC() @trusted nothrow @nogc;
     }
 
     enum
@@ -795,10 +794,13 @@ class ConservativeGC : GC
 
             debug (MEMSTOMP) memset(p, 0xF2, binsize[bin]);
 
-            list.next = gcx.bucket[bin];
-            list.pool = pool;
-            pool.freebits.set(biti);
-            gcx.bucket[bin] = list;
+            // in case the page hasn't been recovered yet, don't add the object to the free list
+            if (!gcx.recoverPool[bin] || pool.binPageChain[pagenum] == Pool.PageRecovered)
+            {
+                list.next = gcx.bucket[bin];
+                list.pool = pool;
+                gcx.bucket[bin] = list;
+            }
             pool.freebits.set(biti);
         }
         pool.clrBits(biti, ~BlkAttr.NONE);
@@ -1109,7 +1111,7 @@ class ConservativeGC : GC
         typeof(return) ret;
 
         ret.numCollections = numCollections;
-        ret.totalCollectionTime = prepTime + markTime + sweepTime + recoverTime;
+        ret.totalCollectionTime = prepTime + markTime + sweepTime;
         ret.totalPauseTime = pauseTime;
         ret.maxCollectionTime = maxCollectionTime;
         ret.maxPauseTime = maxPauseTime;
@@ -1139,6 +1141,20 @@ class ConservativeGC : GC
             immutable sz = binsize[n];
             for (List *list = gcx.bucket[n]; list; list = list.next)
                 freeListSize += sz;
+
+            foreach (pool; gcx.pooltable[0 .. gcx.npools])
+            {
+                if (pool.isLargeObject)
+                    continue;
+                for (uint pn = pool.recoverPageFirst[n]; pn < pool.npages; pn = pool.binPageChain[pn])
+                {
+                    const bitbase = pn * PAGESIZE / 16;
+                    const top = PAGESIZE - sz + 1; // ensure <size> bytes available even if unaligned
+                    for (size_t u = 0; u < top; u += sz)
+                        if (pool.freebits.test(bitbase + u / 16))
+                            freeListSize += sz;
+                }
+            }
         }
 
         stats.usedSize -= freeListSize;
@@ -1221,6 +1237,24 @@ size_t baseOffset(size_t offset, Bins bin) @nogc nothrow
 alias PageBits = GCBits.wordtype[PAGESIZE / 16 / GCBits.BITS_PER_WORD];
 static assert(PAGESIZE % (GCBits.BITS_PER_WORD * 16) == 0);
 
+// bitmask with bits set at base offsets of objects
+immutable PageBits[B_NUMSMALL] baseOffsetBits = (){
+    PageBits[B_NUMSMALL] bits;
+    foreach (bin; 0..B_NUMSMALL)
+    {
+        size_t size = binsize[bin];
+        const top = PAGESIZE - size + 1; // ensure <size> bytes available even if unaligned
+        for (size_t u = 0; u < top; u += size)
+        {
+            size_t biti = u / 16;
+            size_t off = biti / GCBits.BITS_PER_WORD;
+            size_t mod = biti % GCBits.BITS_PER_WORD;
+            bits[bin][off] |= GCBits.BITS_1 << mod;
+        }
+    }
+    return bits;
+}();
+
 private void set(ref PageBits bits, size_t i) @nogc pure nothrow
 {
     assert(i < PageBits.sizeof * 8);
@@ -1245,7 +1279,7 @@ struct Gcx
     uint disabled; // turn off collections if >0
 
     import gc.pooltable;
-    @property size_t npools() pure const nothrow { return pooltable.length; }
+    private @property size_t npools() pure const nothrow { return pooltable.length; }
     PoolTable!Pool pooltable;
 
     List*[B_NUMSMALL] bucket; // free list for each small size
@@ -1260,6 +1294,8 @@ struct Gcx
         LeakDetector leakDetector;
     else
         alias leakDetector = LeakDetector;
+
+    SmallObjectPool*[B_NUMSMALL] recoverPool;
 
     void initialize()
     {
@@ -1288,11 +1324,9 @@ struct Gcx
                    markTime.total!("msecs"));
             printf("\tTotal sweep time:  %lld milliseconds\n",
                    sweepTime.total!("msecs"));
-            printf("\tTotal page recovery time:  %lld milliseconds\n",
-                   recoverTime.total!("msecs"));
             long maxPause = maxPauseTime.total!("msecs");
             printf("\tMax Pause Time:  %lld milliseconds\n", maxPause);
-            long gcTime = (recoverTime + sweepTime + markTime + prepTime).total!("msecs");
+            long gcTime = (sweepTime + markTime + prepTime).total!("msecs");
             printf("\tGrand total GC time:  %lld milliseconds\n", gcTime);
             long pauseTime = (markTime + prepTime).total!("msecs");
 
@@ -1354,10 +1388,8 @@ struct Gcx
             for (size_t p = 0; p < pooltable.length; p++)
                 if (pooltable.pools[p].isLargeObject)
                     (cast(LargeObjectPool*)(pooltable.pools[p])).Invariant();
-
-            for (size_t p = 0; p < pooltable.length; p++)
-                if (pooltable.pools[p].isLargeObject)
-                    (cast(LargeObjectPool*)(pooltable.pools[p])).Invariant();
+                else
+                    (cast(SmallObjectPool*)(pooltable.pools[p])).Invariant();
 
             if (!inCollection)
                 (cast()rangesLock).lock();
@@ -1636,7 +1668,13 @@ struct Gcx
         immutable bin = binTable[size];
         alloc_size = binsize[bin];
 
-        void* p;
+        void* p = bucket[bin];
+        if (p)
+            goto L_hasBin;
+
+        if (recoverPool[bin])
+            recoverNextPage(bin);
+
         bool tryAlloc() nothrow
         {
             if (!bucket[bin])
@@ -1658,11 +1696,17 @@ struct Gcx
                 {
                     // out of memory => try to free some memory
                     fullcollect(false, true); // stop the worlds
+                    if (lowMem)
+                        minimize();
+                    recoverNextPage(bin);
                 }
             }
             else
             {
                 fullcollect();
+                if (lowMem)
+                    minimize();
+                recoverNextPage(bin);
             }
             // tryAlloc will succeed if a new pool was allocated above, if it fails allocate a new pool now
             if (!tryAlloc() && (!newPool(1, false) || !tryAlloc()))
@@ -1670,7 +1714,7 @@ struct Gcx
                 onOutOfMemoryErrorNoGC();
         }
         assert(p !is null);
-
+    L_hasBin:
         // Return next item from free list
         bucket[bin] = (cast(List*)p).next;
         auto pool = (cast(List*)p).pool;
@@ -2239,12 +2283,13 @@ struct Gcx
         //log--;
     }
 
-    // collection step 3: free all unreferenced objects
+    // collection step 3: finalize unreferenced objects, recover full pages with no live objects
     size_t sweep() nothrow
     {
         // Free up everything not marked
         debug(COLLECT_PRINTF) printf("\tfree'ing\n");
         size_t freedLargePages;
+        size_t freedSmallPages;
         size_t freed;
         for (size_t n = 0; n < npools; n++)
         {
@@ -2312,6 +2357,8 @@ struct Gcx
             }
             else
             {
+                // reinit chain of pages to rebuild free list
+                pool.recoverPageFirst[] = cast(uint)pool.npages;
 
                 for (pn = 0; pn < pool.npages; pn++)
                 {
@@ -2319,44 +2366,115 @@ struct Gcx
 
                     if (bin < B_PAGE)
                     {
-                        immutable size = binsize[bin];
-                        void *p = pool.baseAddr + pn * PAGESIZE;
-                        immutable base = pn * (PAGESIZE/16);
-                        immutable bitstride = size / 16;
+                        auto freebitsdata = pool.freebits.data + pn * PageBits.length;
+                        auto markdata = pool.mark.data + pn * PageBits.length;
 
-                        bool freeBits;
+                        // the entries to free are allocated objects (freebits == false)
+                        // that are not marked (mark == false)
                         PageBits toFree;
+                        static foreach (w; 0 .. PageBits.length)
+                            toFree[w] = (~freebitsdata[w] & ~markdata[w]);
 
-                        // ensure that there are at least <size> bytes for every address
-                        //  below ptop even if unaligned
-                        void *ptop = p + PAGESIZE - size + 1;
-                        for (size_t i; p < ptop; p += size, i += bitstride)
+                        // the page is unchanged if there is nothing to free
+                        bool unchanged = true;
+                        static foreach (w; 0 .. PageBits.length)
+                            unchanged = unchanged && (toFree[w] == 0);
+                        if (unchanged)
                         {
-                            immutable biti = base + i;
-
-                            if (!pool.mark.test(biti))
+                            bool hasDead = false;
+                            static foreach (w; 0 .. PageBits.length)
+                                hasDead = hasDead && (~freebitsdata[w] != baseOffsetBits[bin][w]);
+                            if (hasDead)
                             {
-                                void* q = sentinel_add(p);
-                                sentinel_Invariant(q);
+                                // add to recover chain
+                                pool.binPageChain[pn] = pool.recoverPageFirst[bin];
+                                pool.recoverPageFirst[bin] = cast(uint)pn;
+                            }
+                            else
+                            {
+                                pool.binPageChain[pn] = Pool.PageRecovered;
+                            }
+                            continue;
+                        }
 
-                                pool.freebits.set(biti);
-                                if (pool.finals.nbits && pool.finals.test(biti))
-                                    rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
+                        // the page can be recovered if all of the allocated objects (freebits == false)
+                        // are freed
+                        bool recoverPage = true;
+                        static foreach (w; 0 .. PageBits.length)
+                            recoverPage = recoverPage && (~freebitsdata[w] == toFree[w]);
 
-                                freeBits = true;
-                                toFree.set(i);
+                        bool hasFinalizer = false;
+                        debug(COLLECT_PRINTF) // need output for each onject
+                            hasFinalizer = true;
+                        else debug(LOGGING)
+                            hasFinalizer = true;
+                        else debug(MEMSTOMP)
+                            hasFinalizer = true;
+                        if (pool.finals.data)
+                        {
+                            // finalizers must be called on objects that are about to be freed
+                            auto finalsdata = pool.finals.data + pn * PageBits.length;
+                            static foreach (w; 0 .. PageBits.length)
+                                hasFinalizer = hasFinalizer || (toFree[w] & finalsdata[w]) != 0;
+                        }
 
-                                debug(COLLECT_PRINTF) printf("\tcollecting %p\n", p);
-                                leakDetector.log_free(sentinel_add(p));
+                        if (hasFinalizer)
+                        {
+                            immutable size = binsize[bin];
+                            void *p = pool.baseAddr + pn * PAGESIZE;
+                            immutable base = pn * (PAGESIZE/16);
+                            immutable bitstride = size / 16;
 
-                                debug (MEMSTOMP) memset(p, 0xF3, size);
+                            // ensure that there are at least <size> bytes for every address
+                            //  below ptop even if unaligned
+                            void *ptop = p + PAGESIZE - size + 1;
+                            for (size_t i; p < ptop; p += size, i += bitstride)
+                            {
+                                immutable biti = base + i;
 
-                                freed += size;
+// <<<<<<< HEAD
+//                                 pool.freebits.set(biti);
+//                                 if (pool.finals.nbits && pool.finals.test(biti))
+//                                     rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
+// =======
+//                                 if (!pool.mark.test(biti))
+                                {
+                                    void* q = sentinel_add(p);
+                                    sentinel_Invariant(q);
+// >>>>>>> upstream/master
+
+                                    if (pool.finals.nbits && pool.finals.test(biti))
+                                        rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
+
+                                    assert(core.bitop.bt(toFree.ptr, i));
+
+                                    debug(COLLECT_PRINTF) printf("\tcollecting %p\n", p);
+                                    leakDetector.log_free(sentinel_add(p));
+
+                                    debug (MEMSTOMP) memset(p, 0xF3, size);
+                                }
                             }
                         }
 
-                        if (freeBits)
+                        if (recoverPage)
+                        {
+                            pool.freeAllPageBits(pn);
+
+                            pool.pagetable[pn] = B_FREE;
+                            // add to free chain
+                            pool.binPageChain[pn] = cast(uint) pool.searchStart;
+                            pool.searchStart = pn;
+                            pool.freepages++;
+                            freedSmallPages++;
+                        }
+                        else
+                        {
                             pool.freePageBits(pn, toFree);
+
+                            // add to recover chain
+                            pool.binPageChain[pn] = pool.recoverPageFirst[bin];
+                            pool.recoverPageFirst[bin] = cast(uint)pn;
+                        }
                     }
                 }
             }
@@ -2365,79 +2483,99 @@ struct Gcx
         assert(freedLargePages <= usedLargePages);
         usedLargePages -= freedLargePages;
         debug(COLLECT_PRINTF) printf("\tfree'd %u bytes, %u pages from %u pools\n", freed, freedLargePages, npools);
-        return freedLargePages;
-    }
-
-    // collection step 4: recover pages with no live objects, rebuild free lists
-    size_t recover() nothrow
-    {
-        // init tail list
-        List**[B_NUMSMALL] tail = void;
-        foreach (i, ref next; tail)
-            next = &bucket[i];
-
-        // Free complete pages, rebuild free list
-        debug(COLLECT_PRINTF) printf("\tfree complete pages\n");
-        size_t freedSmallPages;
-        for (size_t n = 0; n < npools; n++)
-        {
-            size_t pn;
-            Pool* pool = pooltable[n];
-
-            if (pool.isLargeObject)
-                continue;
-
-            for (pn = 0; pn < pool.npages; pn++)
-            {
-                Bins   bin = cast(Bins)pool.pagetable[pn];
-                size_t biti;
-                size_t u;
-
-                if (bin < B_PAGE)
-                {
-                    size_t size = binsize[bin];
-                    size_t bitstride = size / 16;
-                    size_t bitbase = pn * (PAGESIZE / 16);
-                    size_t bittop = bitbase + (PAGESIZE / 16) - bitstride + 1;
-                    void*  p;
-
-                    biti = bitbase;
-                    for (biti = bitbase; biti < bittop; biti += bitstride)
-                    {
-                        if (!pool.freebits.test(biti))
-                            goto Lnotfree;
-                    }
-                    pool.pagetable[pn] = B_FREE;
-                    pool.freebits.set(bitbase);
-                    if (pn < pool.searchStart) pool.searchStart = pn;
-                    pool.freepages++;
-                    freedSmallPages++;
-                    continue;
-
-                Lnotfree:
-                    p = pool.baseAddr + pn * PAGESIZE;
-                    const top = PAGESIZE - size + 1; // ensure <size> bytes available even if unaligned
-                    for (u = 0; u < top; u += size)
-                    {
-                        biti = bitbase + u / 16;
-                        if (!pool.freebits.test(biti))
-                            continue;
-                        auto elem = cast(List *)(p + u);
-                        elem.pool = pool;
-                        *tail[bin] = elem;
-                        tail[bin] = &elem.next;
-                    }
-                }
-            }
-        }
-        // terminate tail list
-        foreach (ref next; tail)
-            *next = null;
 
         assert(freedSmallPages <= usedSmallPages);
         usedSmallPages -= freedSmallPages;
-        debug(COLLECT_PRINTF) printf("\trecovered pages = %d\n", freedSmallPages);
-        return freedSmallPages;
+        debug(COLLECT_PRINTF) printf("\trecovered small pages = %d\n", freedSmallPages);
+
+        return freedLargePages + freedSmallPages;
+    }
+
+    bool recoverPage(SmallObjectPool* pool, size_t pn, Bins bin) nothrow
+    {
+        size_t size = binsize[bin];
+        size_t bitbase = pn * (PAGESIZE / 16);
+
+        auto freebitsdata = pool.freebits.data + pn * PageBits.length;
+
+        // the page had dead objects when collecting, these cannot have been resurrected
+        bool hasDead = false;
+        static foreach (w; 0 .. PageBits.length)
+            hasDead = hasDead || (freebitsdata[w] != 0);
+        assert(hasDead);
+
+        // prepend to buckets, but with forward addresses inside the page
+        assert(bucket[bin] is null);
+        List** bucketTail = &bucket[bin];
+
+// <<<<<<< HEAD
+//                 if (bin < B_PAGE)
+//                 {
+//                     size_t size = binsize[bin];
+//                     size_t bitstride = size / 16;
+//                     size_t bitbase = pn * (PAGESIZE / 16);
+//                     size_t bittop = bitbase + (PAGESIZE / 16) - bitstride + 1;
+//                     void*  p;
+
+//                     biti = bitbase;
+//                     for (biti = bitbase; biti < bittop; biti += bitstride)
+//                     {
+//                         if (!pool.freebits.test(biti))
+//                             goto Lnotfree;
+//                     }
+//                     pool.pagetable[pn] = B_FREE;
+//                     pool.freebits.set(bitbase);
+//                     if (pn < pool.searchStart) pool.searchStart = pn;
+//                     pool.freepages++;
+//                     freedSmallPages++;
+//                     continue;
+// =======
+//         void* p = pool.baseAddr + pn * PAGESIZE;
+        const top = PAGESIZE - size + 1; // ensure <size> bytes available even if unaligned
+        for (size_t u = 0; u < top; u += size)
+        {
+            if (!core.bitop.bt(freebitsdata, u / 16))
+                continue;
+            auto elem = cast(List *)(p + u);
+            elem.pool = &pool.base;
+            *bucketTail = elem;
+            bucketTail = &elem.next;
+        }
+        *bucketTail = null;
+        assert(bucket[bin] !is null);
+        return true;
+    }
+// >>>>>>> upstream/master
+
+    bool recoverNextPage(Bins bin) nothrow
+    {
+        SmallObjectPool* pool = recoverPool[bin];
+        while (pool)
+        {
+            auto pn = pool.recoverPageFirst[bin];
+            while (pn < pool.npages)
+            {
+                auto next = pool.binPageChain[pn];
+                pool.binPageChain[pn] = Pool.PageRecovered;
+                pool.recoverPageFirst[bin] = next;
+                if (recoverPage(pool, pn, bin))
+                    return true;
+                pn = next;
+            }
+            pool = setNextRecoverPool(bin, pool.ptIndex + 1);
+        }
+        return false;
+    }
+
+    private SmallObjectPool* setNextRecoverPool(Bins bin, size_t poolIndex) nothrow
+    {
+        Pool* pool;
+        while (poolIndex < npools &&
+               ((pool = pooltable[poolIndex]).isLargeObject ||
+                pool.recoverPageFirst[bin] >= pool.npages))
+            poolIndex++;
+
+        return recoverPool[bin] = poolIndex < npools ? cast(SmallObjectPool*)pool : null;
     }
 
     void disableFork() nothrow
@@ -2460,11 +2598,7 @@ struct Gcx
             return 0;
 
         MonoTime start, stop, begin;
-
-        if (config.profile)
-        {
-            begin = start = currTime;
-        }
+        begin = start = currTime;
 
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
@@ -2608,21 +2742,21 @@ Lmark:
         start = stop;
 
         ConservativeGC._inFinalizer = true;
-        size_t freedLargePages=void;
+        size_t freedPages = void;
         {
             scope (failure) ConservativeGC._inFinalizer = false;
-            freedLargePages = sweep();
+            freedPages = sweep();
             ConservativeGC._inFinalizer = false;
         }
 
+        // init bucket lists
+        bucket[] = null;
+        foreach (Bins bin; 0..B_NUMSMALL)
+            setNextRecoverPool(bin, 0);
+
         stop = currTime;
         sweepTime += (stop - start);
-        start = stop;
 
-        immutable freedSmallPages = recover();
-
-        stop = currTime;
-        recoverTime += (stop - start);
         Duration collectionTime = stop - begin;
         if (collectionTime > maxCollectionTime)
             maxCollectionTime = collectionTime;
@@ -2638,7 +2772,7 @@ Lmark:
             minimize();
         }
 
-        return freedLargePages + freedSmallPages;
+        return freedPages;
     }
 
     /**
@@ -2690,8 +2824,9 @@ struct Pool
 {
     void* baseAddr;
     void* topAddr;
+    size_t ptIndex;     // index in pool table
     GCBits mark;        // entries already scanned, or should not be scanned
-    GCBits freebits;    // entries that are on the free list
+    GCBits freebits;    // entries that are on the free list (all bits set but for allocated objects at their base offset)
     GCBits finals;      // entries that need finalizer run on them
     GCBits structFinals;// struct entries that need a finalzier run on them
     GCBits noscan;      // entries that should not be scanned
@@ -2720,6 +2855,17 @@ struct Pool
     // As an optimization, a contiguous range of free pages tracks this information
     //  only for the first and the last page.
     uint* bPageOffsets;
+
+    // The small object pool uses the same array to keep a chain of
+    // - pages with the same bin size that are still to be recovered
+    // - free pages (searchStart is first free page)
+    // other pages are marked by value PageRecovered
+    alias binPageChain = bPageOffsets;
+
+    enum PageRecovered = uint.max;
+
+    // first of chain of pages to recover (SmallObjectPool only)
+    uint[B_NUMSMALL] recoverPageFirst;
 
     // precise GC: TypeInfo.rtInfo for allocation (LargeObjectPool only)
     immutable(size_t)** rtinfo;
@@ -2790,14 +2936,24 @@ struct Pool
         if (!pagetable)
             onOutOfMemoryErrorNoGC();
 
-        if (isLargeObject && npages > 0)
+        if (npages > 0)
         {
             bPageOffsets = cast(uint*)cstdlib.malloc(npages * uint.sizeof);
             if (!bPageOffsets)
                 onOutOfMemoryErrorNoGC();
 
-            bPageOffsets[0] = cast(uint)npages;
-            bPageOffsets[npages-1] = cast(uint)npages;
+            if (isLargeObject)
+            {
+                bPageOffsets[0] = cast(uint)npages;
+                bPageOffsets[npages-1] = cast(uint)npages;
+            }
+            else
+            {
+                // all pages free
+                foreach (n; 0..npages)
+                    binPageChain[n] = cast(uint)(n + 1);
+                recoverPageFirst[] = cast(uint)npages;
+            }
         }
 
         memset(pagetable, B_FREE, npages);
@@ -2983,6 +3139,25 @@ struct Pool
         }
     }
 
+    void freeAllPageBits(size_t pagenum) nothrow
+    {
+        assert(!isLargeObject);
+        assert(!nointerior.nbits); // only for large objects
+
+        immutable beg = pagenum * PageBits.length;
+        static foreach (i; 0 .. PageBits.length)
+        {{
+            immutable w = beg + i;
+            freebits.data[w] = ~0;
+            noscan.data[w] = 0;
+            appendable.data[w] = 0;
+            if (finals.data)
+                finals.data[w] = 0;
+            if (structFinals.data)
+                structFinals.data[w] = 0;
+        }}
+    }
+
     /**
      * Given a pointer p in the p, return the pagenum.
      */
@@ -2997,6 +3172,7 @@ struct Pool
         return cast(size_t)(p - baseAddr) / PAGESIZE;
     }
 
+    public
     @property bool isFree() const pure nothrow
     {
         return npages == freepages;
@@ -3426,6 +3602,29 @@ struct SmallObjectPool
     Pool base;
     alias base this;
 
+    debug(INVARIANT)
+    void Invariant()
+    {
+        //base.Invariant();
+        uint cntRecover = 0;
+        foreach (Bins bin; 0 .. B_NUMSMALL)
+        {
+            for (auto pn = recoverPageFirst[bin]; pn < npages; pn = binPageChain[pn])
+            {
+                assert(pagetable[pn] == bin);
+                cntRecover++;
+            }
+        }
+        uint cntFree = 0;
+        for (auto pn = searchStart; pn < npages; pn = binPageChain[pn])
+        {
+            assert(pagetable[pn] == B_FREE);
+            cntFree++;
+        }
+        assert(cntFree == freepages);
+        assert(cntFree + cntRecover <= npages);
+    }
+
     /**
     * Get size of pointer p in pool.
     */
@@ -3524,15 +3723,15 @@ struct SmallObjectPool
     */
     List* allocPage(Bins bin) nothrow
     {
-        size_t pn;
-        for (pn = searchStart; pn < npages; pn++)
-            if (pagetable[pn] == B_FREE)
-                goto L1;
+        if (searchStart >= npages)
+            return null;
 
-        return null;
+        assert(pagetable[searchStart] == B_FREE);
 
     L1:
-        searchStart = pn + 1;
+        size_t pn = searchStart;
+        searchStart = binPageChain[searchStart];
+        binPageChain[pn] = Pool.PageRecovered;
         pagetable[pn] = cast(ubyte)bin;
         freepages--;
 
@@ -4371,4 +4570,21 @@ unittest
 
     void* small = GC.malloc(100, BlkAttr.NO_SCAN);
     test(small);
+}
+
+unittest
+{
+    import core.memory;
+
+    auto now = currTime;
+    GC.ProfileStats stats1 = GC.profileStats();
+    GC.collect();
+    GC.ProfileStats stats2 = GC.profileStats();
+    auto diff = currTime - now;
+
+    assert(stats2.totalCollectionTime - stats1.totalCollectionTime <= diff);
+    assert(stats2.totalPauseTime - stats1.totalPauseTime <= stats2.totalCollectionTime - stats1.totalCollectionTime);
+
+    assert(stats2.maxPauseTime >= stats1.maxPauseTime);
+    assert(stats2.maxCollectionTime >= stats1.maxCollectionTime);
 }

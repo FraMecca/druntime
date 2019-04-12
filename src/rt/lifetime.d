@@ -1180,7 +1180,7 @@ extern (C) void _d_delarray_t(void[]* p, const TypeInfo_Struct ti)
     }
 }
 
-unittest
+deprecated unittest
 {
     __gshared size_t countDtor = 0;
     struct S
@@ -1420,12 +1420,12 @@ extern (C) void rt_finalize2(void* p, bool det = true, bool resetMemory = true) 
     }
 }
 
-extern (C) void rt_finalize(void* p, bool det = true)
+extern (C) void rt_finalize(void* p, bool det = true) nothrow
 {
     rt_finalize2(p, det, true);
 }
 
-extern (C) void rt_finalizeFromGC(void* p, size_t size, uint attr)
+extern (C) void rt_finalizeFromGC(void* p, size_t size, uint attr) nothrow
 {
     // to verify: reset memory necessary?
     if (!(attr & BlkAttr.STRUCTFINAL))
@@ -2567,7 +2567,7 @@ unittest
 
 // test struct finalizers
 debug(SENTINEL) {} else
-unittest
+deprecated unittest
 {
     __gshared int dtorCount;
     static struct S1
