@@ -2797,9 +2797,9 @@ Lmark:
             thread_resumeAll();
         }
 
-		// If we reach here, the child process has finished the marking phase
-		// or block == true and we are using standard stop the world collection.
-		// It is time to sweep
+        // If we reach here, the child process has finished the marking phase
+        // or block == true and we are using standard stop the world collection.
+        // It is time to sweep
 
         stop = currTime;
         markTime += (stop - start);
