@@ -33,7 +33,7 @@ module gc.impl.conservative.gc;
 //debug = PROFILE_API;          // profile API calls for config.profile > 1
 
 /***************************************************/
-version = COLLECT_FORK;  // parallel scanning
+version = COLLECT_PARALLEL;  // parallel scanning
 
 import gc.bits;
 import gc.os;
@@ -2646,18 +2646,13 @@ struct Gcx
         begin = start = currTime;
 
         debug(COLLECT_PRINTF) printf("Gcx.fullcollect()\n");
+        bool doFork = config.fork;
         version (COLLECT_PARALLEL)
             bool doParallel = config.parallel > 0;
         else
             enum doParallel = false;
-        version (COLLECT_FORK)
-        {
-            bool doFork = config.fork;
-            static assert(HAVE_FORK, "Can't compile version = COLLECT_FORK on a system with no mmap support");
-        }
-        else
-            enum doFork = false;
 
+        assert(!(doFork && doParallel), "No reason in mixing threads and fork");
         //printf("\tpool address range = %p .. %p\n", minAddr, maxAddr);
 
         // If there is a mark process running, check if it already finished.
