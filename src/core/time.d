@@ -164,7 +164,7 @@ version (CoreDdoc) enum ClockType
     normal = 0,
 
     /++
-        $(BLUE Linux-Only)
+        $(BLUE Linux,OpenBSD-Only)
 
         Uses $(D CLOCK_BOOTTIME).
       +/
@@ -214,7 +214,7 @@ version (CoreDdoc) enum ClockType
     precise = 3,
 
     /++
-        $(BLUE Linux,Solaris-Only)
+        $(BLUE Linux,OpenBSD,Solaris-Only)
 
         Uses $(D CLOCK_PROCESS_CPUTIME_ID).
       +/
@@ -251,14 +251,14 @@ version (CoreDdoc) enum ClockType
     second = 6,
 
     /++
-        $(BLUE Linux,Solaris-Only)
+        $(BLUE Linux,OpenBSD,Solaris-Only)
 
         Uses $(D CLOCK_THREAD_CPUTIME_ID).
       +/
     threadCPUTime = 7,
 
     /++
-        $(BLUE FreeBSD-Only)
+        $(BLUE DragonFlyBSD,FreeBSD,OpenBSD-Only)
 
         Uses $(D CLOCK_UPTIME).
       +/
@@ -319,6 +319,17 @@ else version (NetBSD) enum ClockType
     coarse = 2,
     precise = 3,
     second = 6,
+}
+else version (OpenBSD) enum ClockType
+{
+    normal = 0,
+    bootTime = 1,
+    coarse = 2,
+    precise = 3,
+    processCPUTime = 4,
+    second = 6,
+    threadCPUTime = 7,
+    uptime = 8,
 }
 else version (DragonFlyBSD) enum ClockType
 {
@@ -393,6 +404,21 @@ version (Posix)
             case coarse: return CLOCK_MONOTONIC;
             case normal: return CLOCK_MONOTONIC;
             case precise: return CLOCK_MONOTONIC;
+            case second: assert(0);
+            }
+        }
+        else version (OpenBSD)
+        {
+            import core.sys.openbsd.time;
+            with(ClockType) final switch (clockType)
+            {
+            case bootTime: return CLOCK_BOOTTIME;
+            case coarse: return CLOCK_MONOTONIC;
+            case normal: return CLOCK_MONOTONIC;
+            case precise: return CLOCK_MONOTONIC;
+            case processCPUTime: return CLOCK_PROCESS_CPUTIME_ID;
+            case threadCPUTime: return CLOCK_THREAD_CPUTIME_ID;
+            case uptime: return CLOCK_UPTIME;
             case second: assert(0);
             }
         }
@@ -2543,8 +2569,11 @@ unittest
 
     static bool clockSupported(ClockType c)
     {
-        version (Linux_Pre_2639) // skip CLOCK_BOOTTIME on older linux kernels
-            return c != ClockType.second && c != ClockType.bootTime;
+        // Skip unsupported clocks on older linux kernels, assume that only
+        // CLOCK_MONOTONIC and CLOCK_REALTIME exist, as that is the lowest
+        // common denominator supported by all versions of Linux pre-2.6.12.
+        version (Linux_Pre_2639)
+            return c == ClockType.normal || c == ClockType.precise;
         else
             return c != ClockType.second; // second doesn't work with MonoTimeImpl
 
