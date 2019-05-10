@@ -215,6 +215,7 @@ class ConservativeGC : GC
             onOutOfMemoryErrorNoGC();
         gcx.initialize();
 
+        printf("merge rel\n");
         if (config.initReserve)
             gcx.reserve(config.initReserve << 20);
         if (config.disable)
@@ -1104,7 +1105,6 @@ class ConservativeGC : GC
 
         return ret;
     }
-
 
     core.memory.GC.ProfileStats profileStats() nothrow
     {
@@ -2518,7 +2518,6 @@ struct Gcx
         return true;
     }
 
->>>>>>> upstream/master
     bool recoverNextPage(Bins bin) nothrow
     {
         SmallObjectPool* pool = recoverPool[bin];
@@ -2676,6 +2675,13 @@ Lmark:
                         if (!block)
                         {
                           markProcPid = pid;
+                          // update profiling informations
+                          stop = currTime;
+                          markTime += (stop - start);
+                          Duration pause = stop - begin;
+                          if (pause > maxPauseTime)
+                              maxPauseTime = pause;
+                          pauseTime += pause;
                           return 0;
                         }
                         WRes r = wait_pid(pid); // block until marking is done
@@ -2706,7 +2712,7 @@ Lmark:
 		// or block == true and we are using standard stop the world collection.
 		// It is time to sweep
 
-		stop = currTime;
+        stop = currTime;
         markTime += (stop - start);
         Duration pause = stop - begin;
         if (pause > maxPauseTime)
@@ -2720,6 +2726,14 @@ Lmark:
             scope (failure) ConservativeGC._inFinalizer = false;
             freedPages = sweep();
             ConservativeGC._inFinalizer = false;
+        }
+
+        // minimize() should be called only after a call to fullcollect
+        // terminates with a sweep
+        if (shouldMinimize || lowMem)
+        {
+            shouldMinimize = false;
+            minimize();
         }
 
         // init bucket lists
@@ -2737,14 +2751,6 @@ Lmark:
         ++numCollections;
 
         updateCollectThresholds();
-        // minimize() should be called only after a call to fullcollect
-        // terminates with a sweep
-        if (shouldMinimize || lowMem)
-        {
-            shouldMinimize = false;
-            minimize();
-        }
-
         return freedPages;
     }
 
